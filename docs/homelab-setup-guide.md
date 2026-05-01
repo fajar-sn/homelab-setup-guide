@@ -1102,7 +1102,101 @@ Prometheus: 30d      Prometheus: 90d            Prometheus: 1 year
 [ ] Proxmox: Node → Disks — new 4TB drive should appear (e.g., /dev/sdb)
 ```
 
-#### Step 2: Enable VT-d in BIOS
+#### Step 2: Drive Health Check & Burn-In
+
+> Run before creating the ZFS pool.
+> **Do not skip on used drives** — `badblocks` surfaces latent sector failures that SMART alone misses.
+
+> ⚠️ `badblocks -w` is **destructive** — it erases all data on the drive.
+> The drive must be empty. This is intentional: burn-in runs before the ZFS pool exists.
+
+```bash
+# Install required tools on the Proxmox host
+apt install smartmontools tmux fio
+# badblocks is part of e2fsprogs — already present on Proxmox
+```
+
+**2a — Re-run Extended SMART Self-Test**
+
+> Re-run now that the drive is seated and has been powered on for several hours.
+> Temperature-dependent defects sometimes only appear during actual operation.
+
+```bash
+# Confirm drive path
+lsblk -d -o NAME,TYPE,SIZE,ROTA,TRAN
+smartctl -t long /dev/sdb        # replace with your actual drive path
+
+# Wait 60–90 minutes, then check:
+smartctl -l selftest /dev/sdb
+# Must show: Completed without error
+```
+
+**2b — Full Surface Scan (badblocks)**
+
+> Writes 4 byte patterns to every sector, verifies each pass.
+> Takes **8–16 hours** for a 4TB HDD. Plan overnight.
+
+```bash
+# Run inside tmux so it survives SSH disconnection
+tmux new -s burnin
+
+# -w = write mode (4 passes, destructive)  -s = show progress  -v = verbose
+# Replace /dev/sdb with your actual drive path
+badblocks -wsv /dev/sdb 2>&1 | tee /root/badblocks-sdb-$(date +%Y%m%d).log
+
+# Detach from tmux (keeps running):  Ctrl-B then D
+# Reattach later:                    tmux attach -t burnin
+```
+
+Expected final line when complete:
+```
+Pass completed, 0 bad blocks found.
+```
+
+If badblocks reports **any** bad blocks → **do not use this drive**. Return it to the seller.
+
+**2c — Monitor Temperature During Burn-In**
+
+```bash
+# Run in a separate terminal while burn-in is in progress
+watch -n 60 "smartctl -A /dev/sdb | grep -i temp"
+# Safe range: 30–55°C under sustained write load
+# If ≥ 58°C → pause burn-in, improve enclosure ventilation, then retry
+```
+
+**2d — Throughput Sanity Check (fio)**
+
+```bash
+# Sequential read — confirms drive performs within expected range
+fio --name=seqread --rw=read --direct=1 --ioengine=libaio \
+    --bs=1M --numjobs=1 --size=10G --runtime=60 \
+    --group_reporting --filename=/dev/sdb
+# Expected 7200rpm SAS/SATA HDD: 150–250 MB/s
+# If < 80 MB/s → suspect bad cable, enclosure issue, or drive problem
+```
+
+**2e — Post-Burn-In SMART Check**
+
+```bash
+smartctl --all /dev/sdb | grep -E "Health Status|grown defect|uncorrected"
+# Must still show:
+#   SMART Health Status: OK
+#   Elements in grown defect list: (same or minimally higher than before)
+#   uncorrected errors:             0
+```
+
+**Burn-In Gate — all 5 must pass before Step 3:**
+```
+[ ] Extended SMART self-test:    Completed without error
+[ ] badblocks:                   0 bad blocks found
+[ ] Temperature:                 stayed ≤ 55°C throughout sustained write
+[ ] Throughput:                  ≥ 80 MB/s sequential read
+[ ] Post-burn-in SMART:          Health OK, uncorrected errors = 0
+
+If badblocks finds bad blocks → return the drive. Do not build a ZFS pool on it.
+```
+
+#### Step 3: Enable VT-d in BIOS
 ```
 [ ] Reboot → F10 → Advanced → Device Options
 [ ] Enable VT-d (Intel Virtualization Technology for Directed I/O)
@@ -1110,7 +1204,7 @@ Prometheus: 30d      Prometheus: 90d            Prometheus: 1 year
     Needed for: PCIe passthrough of SATA card → TrueNAS VM
 ```
 
-#### Step 3: Create TrueNAS Scale VM in Proxmox
+#### Step 4: Create TrueNAS Scale VM in Proxmox
 ```
 [ ] Download TrueNAS Scale ISO → upload to Proxmox local storage
 [ ] Proxmox UI → Create VM:
@@ -1127,7 +1221,7 @@ Prometheus: 30d      Prometheus: 90d            Prometheus: 1 year
 [ ] Access TrueNAS UI: http://192.168.1.11
 ```
 
-#### Step 4: Create Single-Disk ZFS Pool
+#### Step 5: Create Single-Disk ZFS Pool
 ```
 [ ] TrueNAS UI → Storage → Create Pool
     Name:   tank
@@ -1144,7 +1238,7 @@ Prometheus: 30d      Prometheus: 90d            Prometheus: 1 year
     tank/backups
 ```
 
-#### Step 5: NFS Shares for LXC Access
+#### Step 6: NFS Shares for LXC Access
 ```
 [ ] TrueNAS UI → Sharing → NFS → Add (one share per dataset):
     /mnt/tank/immich      → Networks: 192.168.1.0/24
@@ -1156,7 +1250,7 @@ Prometheus: 30d      Prometheus: 90d            Prometheus: 1 year
 [ ] Services → NFS → Start + Enable on boot
 ```
 
-#### Step 6: Mount NFS Shares in Each LXC
+#### Step 7: Mount NFS Shares in Each LXC
 ```
 In each LXC, add mounts to /etc/fstab:
   192.168.1.11:/mnt/tank/immich      /opt/immich/library   nfs  defaults,_netdev  0  0
@@ -1167,7 +1261,7 @@ Test before migrating data: mount -a && df -h
 Verify each mount appears before proceeding.
 ```
 
-#### Step 7: Migrate Data (Service by Service)
+#### Step 8: Migrate Data (Service by Service)
 ```
 ⚠️ Verify B2 backup ran today BEFORE touching any service.
 
@@ -1202,7 +1296,7 @@ Verify each mount appears before proceeding.
     docker start prometheus → verify metrics flowing ✅
 ```
 
-#### Step 8: Post-Migration Cleanup
+#### Step 9: Post-Migration Cleanup
 ```
 [ ] Wait 24 hours — verify ALL services stable before cleanup
 [ ] Remove old data dirs from NVMe to reclaim space
@@ -1236,6 +1330,15 @@ Verify each mount appears before proceeding.
 [ ] Install 2nd WD Red Plus 4TB in Bay 2 of the enclosure
 [ ] Power on → verify Proxmox + TrueNAS VM boot normally
 [ ] TrueNAS UI → Storage → Disks — new drive should appear
+```
+
+```bash
+# Quick SMART health check on the new drive from the Proxmox host before mirroring
+smartctl --all /dev/sdc        # replace with actual new drive path
+# Verify: SMART Health Status: OK, Elements in grown defect list: ≤ 50
+# For used drives with high power-on hours, run the extended test first:
+#   smartctl -t long /dev/sdc
+#   smartctl -l selftest /dev/sdc   (check after ~90 min)
 ```
 
 #### Step 2: Attach Mirror Online (No Downtime)
