@@ -3,8 +3,8 @@
 
 **Target:** Deploy all personal services in CT101 via Docker — Portainer, Vaultwarden, Immich, Stirling-PDF, Uptime Kuma
 **Timeframe:** Day 2–3 (3–5 hours)
-**Prerequisite:** [Phase 2 — Network Services](phase-2-network-services.md) complete (CT101 running, Nginx PM ready at 192.168.1.100:81)
-**Outcome:** All personal services accessible via `*.yourdomain.com` internal URLs through Nginx PM
+**Prerequisite:** [Phase 2 — Network Services](phase-2-network-services.md) complete (CT101 running, Traefik ready at 192.168.1.100:443)
+**Outcome:** All personal services accessible via `*.yourdomain.com` internal HTTPS URLs through Traefik
 **Next:** [Phase 4 — Remote Access via Tailscale](phase-4-remote-access.md)
 
 ---
@@ -19,7 +19,7 @@
 6. [Set Up Immich](#step-35-set-up-immich-photo-library)
 7. [Set Up Stirling-PDF](#step-36-set-up-stirling-pdf)
 8. [Set Up Uptime Kuma](#step-37-set-up-uptime-kuma-monitoring)
-9. [Add Services to Nginx Proxy Manager](#step-38-add-services-to-nginx-proxy-manager)
+9. [Configure Traefik Routes](#step-38-configure-traefik-routes)
 10. [Test DNS & Access Services](#step-39-test-dns--access-services)
 11. [Backup Strategy](#step-310-backup-strategy)
 12. [Testing & Verification Checklist](#testing--verification-checklist)
@@ -43,13 +43,13 @@
 
 | URL | Service | Underlying Port |
 |---|---|---|
-| `http://vault.yourdomain.com` | Vaultwarden | CT101:8080 → Nginx |
-| `http://immich.yourdomain.com` | Immich | CT101:2283 → Nginx |
-| `http://pdf.yourdomain.com` | Stirling-PDF | CT101:8081 → Nginx |
-| `http://status.yourdomain.com` | Uptime Kuma | CT101:3001 → Nginx |
-| `http://portainer.yourdomain.com` | Portainer | CT101:9000 → Nginx |
+| `https://vault.yourdomain.com` | Vaultwarden | CT101:8080 → Traefik |
+| `https://immich.yourdomain.com` | Immich | CT101:2283 → Traefik |
+| `https://pdf.yourdomain.com` | Stirling-PDF | CT101:8081 → Traefik |
+| `https://status.yourdomain.com` | Uptime Kuma | CT101:3001 → Traefik |
+| `https://portainer.yourdomain.com` | Portainer | CT101:9000 → Traefik |
 
-> **All `*.yourdomain.com` URLs route through Nginx PM at 192.168.1.100 — not directly to CT101. pfSense resolves them internally via split-DNS.**
+> **All `*.yourdomain.com` URLs route through Traefik at 192.168.1.100 — not directly to CT101. pfSense resolves them internally via split-DNS. All routes are HTTPS with auto-renewed Let's Encrypt certs via Cloudflare DNS challenge.**
 
 ### Storage Warning (NVMe-only Setup)
 
@@ -146,7 +146,7 @@ http://192.168.1.101:9000
 2. Choose **Get Started** (local Docker environment)
 3. You'll see all running containers on CT101 ✅
 
-> **Add to Nginx PM later:** After Step 3.8, add proxy host `portainer.yourdomain.com` → `192.168.1.101:9000`
+> **Route via Traefik:** Once Traefik is running (Phase 2), add the `portainer` route to `/opt/traefik/config/services.yml` on CT100 (covered in Step 3.8).
 
 ---
 
@@ -228,7 +228,7 @@ You'll see Vaultwarden login page ✅
 
 #### 3.3.5: Offline USB Backup (Emergency Recovery)
 
-> **Why:** If Backblaze B2 is unavailable or rclone fails, you need a physical backup accessible offline.
+> **Why:** If Backblaze B2 is unavailable or the backup job fails, you need a physical backup accessible offline.
 
 1. Log into Vaultwarden → click account name → **Account Settings**
 2. Go to **Security** → **Export Vault**
@@ -245,19 +245,23 @@ You'll see Vaultwarden login page ✅
 ### Step 3.4: Set Up Backblaze B2 Backup for Vaultwarden
 
 > **CRITICAL:** Vaultwarden holds all your passwords. If the container dies with no backup, you lose everything.
-> **Strategy:** Automatic daily backup to Backblaze B2 (free 10 GB tier).
+> **Tool:** restic (NOT rclone — rclone syncs and can overwrite good data with corrupted data; restic creates immutable snapshots)
+> **Backend:** Backblaze B2 with Object Lock enabled (ransomware-proof, accidental-delete-proof)
 
 #### 3.4.1: Create Backblaze B2 Account
 
-1. Go to **backblaze.com** → **Sign up** → Free tier (10 GB free)
+1. Go to **backblaze.com** → **Sign up** → create account
 2. Verify email
 
-#### 3.4.2: Create B2 Bucket for Backups
+#### 3.4.2: Create B2 Bucket with Object Lock
 
 1. B2 dashboard → **Buckets** → **Create a Bucket**
 2. Bucket name: `homelab-backups`
-3. **Type:** Private
-4. Create bucket
+3. **Files in Bucket:** Private
+4. **Object Lock:** Enable → **Governance mode** (protects against accidental delete + ransomware; you can still unlock as account owner if needed)
+5. Create bucket
+
+> **Why Object Lock matters:** With Object Lock, even if an attacker steals your B2 API key and tries to delete all backups, B2 will refuse. Locked objects cannot be deleted or overwritten during the retention period.
 
 #### 3.4.3: Generate B2 Application Key
 
@@ -271,81 +275,81 @@ You'll see Vaultwarden login page ✅
 ```
 Application Key ID:     [copy this]
 Application Key:        [copy this]
-Bucket ID:              [copy this]
 ```
 
-**Save these three values in Vaultwarden** (once set up) or in a secure note now.
+**Save both values in Vaultwarden** (once set up) or in a secure note now.
 
-#### 3.4.4: Install Rclone in Core Services Container
+#### 3.4.4: Install restic in Core Services Container
 
 SSH into container 101:
 
 ```bash
-curl https://rclone.org/install.sh | sudo bash
-rclone --version
+apt update && apt install -y restic
+restic version
 ```
 
-#### 3.4.5: Configure Rclone for B2
+#### 3.4.5: Configure B2 credentials as environment variables
 
 ```bash
-rclone config
+cat > /etc/restic-b2.env << 'EOF'
+export B2_ACCOUNT_ID=your_application_key_id_here
+export B2_ACCOUNT_KEY=your_application_key_here
+export RESTIC_PASSWORD=your_strong_restic_repo_password_here
+EOF
+
+chmod 600 /etc/restic-b2.env
 ```
 
-**Follow prompts:**
-- Type `n` (new remote)
-- `name>` → type `backblaze-b2`
-- `Type of storage>` → type `b2`
-- `account_id>` → paste your Application Key ID
-- `application_key>` → paste your Application Key
-- Confirm: `y`
-- Quit: `q`
+> **RESTIC_PASSWORD** is the encryption key for your backup repository. Store it in Vaultwarden. If you lose it, the backups are permanently unreadable.
 
-#### 3.4.6: Verify Rclone Connection
+#### 3.4.6: Initialise the restic repository
 
 ```bash
-rclone lsd backblaze-b2:
+source /etc/restic-b2.env
+restic -r b2:homelab-backups:/vaultwarden init
 ```
 
 **Expected output:**
 ```
-          -1 2026-04-25 10:00:00     -1 homelab-backups
+created restic repository xxxxxxxx at b2:homelab-backups:/vaultwarden
+Please note that knowledge of your password is required to access the repository.
+Losing your password means that your data is irrecoverably lost!
 ```
 
-#### 3.4.7: Create Backup Script
+#### 3.4.7: Create backup script
 
 ```bash
-cat > /opt/vaultwarden/backup-to-b2.sh << 'EOF'
+cat > /opt/vaultwarden/backup-to-b2.sh << 'SCRIPT'
 #!/bin/bash
+# Vaultwarden restic backup to Backblaze B2
+# Tool: restic (immutable snapshots, always encrypted, deduplication)
 
-# Vaultwarden Backup to Backblaze B2
-# Run daily via cron
+set -euo pipefail
+source /etc/restic-b2.env
 
-VAULTWARDEN_DATA="/opt/vaultwarden/vw-data"
-BACKUP_DIR="/tmp/vw-backup-$(date +%Y%m%d-%H%M%S)"
-B2_PATH="backblaze-b2:homelab-backups/vaultwarden/$(date +%Y-%m-%d)"
+REPO="b2:homelab-backups:/vaultwarden"
 
-# 1. Create backup directory
-mkdir -p "$BACKUP_DIR"
+# 1. Backup data directory
+restic -r "$REPO" backup /opt/vaultwarden/vw-data \
+  --tag vaultwarden \
+  --exclude '*.tmp'
 
-# 2. Backup database
-docker exec vaultwarden sh -c "tar -czf - /data" > "$BACKUP_DIR/vaultwarden-data.tar.gz"
+# 2. Verify snapshot integrity
+restic -r "$REPO" check --read-data-subset=5%
 
-# 3. Upload to B2
-rclone sync "$BACKUP_DIR" "$B2_PATH" --progress --log-level INFO
+# 3. Prune: keep 30 daily, 12 monthly snapshots
+restic -r "$REPO" forget \
+  --keep-daily 30 \
+  --keep-monthly 12 \
+  --prune
 
-# 4. Keep last 30 days (delete older backups for THIS path only)
-rclone delete backblaze-b2:homelab-backups/vaultwarden --min-age 30d
-
-# 5. Cleanup local backup
-rm -rf "$BACKUP_DIR"
-
-echo "Backup to B2 completed: $(date)" >> /var/log/vw-backup.log
-EOF
+echo "restic backup completed: $(date)" >> /var/log/vw-backup.log
+SCRIPT
 
 chmod +x /opt/vaultwarden/backup-to-b2.sh
 ```
 
-#### 3.4.8: Schedule Daily Backup via Cron
+#### 3.4.8: Schedule daily backup via cron
 
 ```bash
 crontab -e
@@ -353,22 +357,31 @@ crontab -e
 
 Add at the end:
 ```
-0 2 * * * /opt/vaultwarden/backup-to-b2.sh
+0 2 * * * /opt/vaultwarden/backup-to-b2.sh >> /var/log/vw-backup.log 2>&1
 ```
-
-(Runs daily at 2 AM)
 
 Save: Ctrl+O → Enter → Ctrl+X
 
-#### 3.4.9: Test Backup Manually
+#### 3.4.9: Test backup manually and verify
 
 ```bash
+# Run backup
 /opt/vaultwarden/backup-to-b2.sh
+
+# Verify snapshots exist
+source /etc/restic-b2.env
+restic -r b2:homelab-backups:/vaultwarden snapshots
+# Must show at least one snapshot
+
+# Test restore to temp dir (non-destructive verification)
+restic -r b2:homelab-backups:/vaultwarden restore latest --target /tmp/vw-restore
+ls /tmp/vw-restore/opt/vaultwarden/vw-data
+# Must show db.sqlite3
+
+rm -rf /tmp/vw-restore
 ```
 
-**Verify in B2 dashboard:** Buckets → homelab-backups → should see folder `vaultwarden/2026-xx-xx/`
-
-✅ Automated backup configured.
+✅ restic backup with Object Lock configured. Your passwords are now protected against corruption, ransomware, and accidental delete.
 
 ---
 
@@ -606,7 +619,7 @@ In Uptime Kuma dashboard → **Add New Monitor**:
 | Vaultwarden Health | HTTP(s) | `http://192.168.1.101:8080/alive` |
 | Immich | HTTP(s) | `http://192.168.1.101:2283/api/server/ping` |
 | Stirling-PDF | HTTP(s) | `http://192.168.1.101:8081/health` |
-| Nginx PM | HTTP(s) | `http://192.168.1.100:81` |
+| Traefik | HTTP(s) | `https://traefik.yourdomain.com` |
 | AdGuard Home | HTTP(s) | `http://192.168.1.100:3000` |
 | Proxmox | HTTP(s) | `https://192.168.1.10:8006` |
 
@@ -642,48 +655,136 @@ chmod +x /opt/uptime-kuma/check-disk.sh
 
 ## DNS & Reverse Proxy Configuration
 
-### Step 3.8: Add Services to Nginx Proxy Manager
+### Step 3.8: Configure Traefik Routes
 
-> **Goal:** Route clean `*.yourdomain.com` internal URLs to services via Nginx PM.
+> **Goal:** Define HTTPS routes for all CT101 services in Traefik's file provider config on CT100.
+> **Why file provider, not labels:** Traefik runs on CT100 and reads only its own Docker daemon. Labels on CT101 containers are on a completely separate Docker daemon — invisible to Traefik. The file provider is the correct approach for cross-host routing.
 
-#### 3.8.1: Access Nginx PM Admin
+#### 3.8.1: SSH into CT100 and populate services.yml
 
-Browser:
-```
-http://192.168.1.100:81
-```
-
-Login with credentials set in Phase 2 Step 2.8.5.
-
-#### 3.8.2: Add Proxy Host for Vaultwarden
-
-1. **Proxy Hosts** → **Add Proxy Host**
-
-```
-Domain Names:          vault.yourdomain.com
-Scheme:                http
-Forward Hostname/IP:   192.168.1.101
-Forward Port:          8080
-Cache Assets:          OFF
-Block Common Exploits: ON
+```bash
+ssh root@192.168.1.100
 ```
 
-Click **Save**
+Replace the placeholder `services.yml` created in Phase 2 with the full config for all CT101 services:
 
-#### 3.8.3: Add Proxy Hosts for All Other Services
+```bash
+cat > /opt/traefik/config/services.yml << 'EOF'
+# Traefik file provider — cross-host routes for CT101 services
+# Traefik watches this file (watch=true) and hot-reloads on every save
+http:
+  routers:
+    vault:
+      rule: "Host(`vault.yourdomain.com`)"
+      entryPoints: [websecure]
+      tls:
+        certResolver: cloudflare
+      service: vault-svc
 
-Repeat **Add Proxy Host** for each:
+    portainer:
+      rule: "Host(`portainer.yourdomain.com`)"
+      entryPoints: [websecure]
+      tls:
+        certResolver: cloudflare
+      service: portainer-svc
 
-| Domain | Scheme | Forward IP | Forward Port |
-|---|---|---|---|
-| `immich.yourdomain.com` | http | `192.168.1.101` | `2283` |
-| `pdf.yourdomain.com` | http | `192.168.1.101` | `8081` |
-| `status.yourdomain.com` | http | `192.168.1.101` | `3001` |
-| `portainer.yourdomain.com` | http | `192.168.1.101` | `9000` |
-| `nginx.yourdomain.com` | http | `192.168.1.100` | `81` |
-| `adguard.yourdomain.com` | http | `192.168.1.100` | `3000` |
+    immich:
+      rule: "Host(`immich.yourdomain.com`)"
+      entryPoints: [websecure]
+      tls:
+        certResolver: cloudflare
+      service: immich-svc
 
-After adding all → **Proxy Hosts** tab shows your full list ✅
+    pdf:
+      rule: "Host(`pdf.yourdomain.com`)"
+      entryPoints: [websecure]
+      tls:
+        certResolver: cloudflare
+      service: pdf-svc
+
+    status:
+      rule: "Host(`status.yourdomain.com`)"
+      entryPoints: [websecure]
+      tls:
+        certResolver: cloudflare
+      service: status-svc
+
+  services:
+    vault-svc:
+      loadBalancer:
+        servers:
+          - url: "http://192.168.1.101:8080"
+
+    portainer-svc:
+      loadBalancer:
+        servers:
+          - url: "http://192.168.1.101:9000"
+
+    immich-svc:
+      loadBalancer:
+        servers:
+          - url: "http://192.168.1.101:2283"
+
+    pdf-svc:
+      loadBalancer:
+        servers:
+          - url: "http://192.168.1.101:8081"
+
+    status-svc:
+      loadBalancer:
+        servers:
+          - url: "http://192.168.1.101:3001"
+EOF
+```
+
+> **Replace** `yourdomain.com` with your actual domain throughout.
+
+Routes go live within seconds — no Traefik restart needed.
+
+#### 3.8.2: Verify routes are active
+
+Check Traefik picked up the new config:
+
+```bash
+docker logs traefik 2>&1 | tail -20
+# Look for: "Configuration loaded" or "Adding route"
+# No errors = file was parsed correctly
+```
+
+#### 3.8.3: Verify all routers appear in Traefik dashboard
+
+From your laptop browser:
+```
+https://traefik.yourdomain.com
+```
+
+**Expected:** Traefik dashboard → **HTTP** → **Routers** → shows `vault`, `portainer`, `immich`, `pdf`, `status` → all green
+
+If a router is missing: check `services.yml` YAML indentation (YAML is whitespace-sensitive) and re-save.
+
+#### 3.8.4: How to add a future service
+
+For any new service deployed to CT101, append to `services.yml` on CT100:
+
+```yaml
+# Under http.routers:
+    NEW_SERVICE:
+      rule: "Host(`new-service.yourdomain.com`)"
+      entryPoints: [websecure]
+      tls:
+        certResolver: cloudflare
+      service: new-service-svc
+
+# Under http.services:
+    new-service-svc:
+      loadBalancer:
+        servers:
+          - url: "http://192.168.1.101:PORT"
+```
+
+Also add a pfSense host override for `new-service` → `192.168.1.100` (Phase 2 Step 2.6.11).
+
+The CT101 `docker-compose.yml` needs **no labels and no proxy network** — services just need to be accessible on `192.168.1.101:PORT`.
 
 ---
 
@@ -703,21 +804,21 @@ nslookup immich.yourdomain.com
 
 If these fail: Check pfSense host overrides are saved and applied with domain `yourdomain.com` (Phase 2 Step 2.6.10).
 
-#### 3.9.2: Access All Services via .lan URLs
+#### 3.9.2: Access All Services via HTTPS URLs
 
 Test each URL from your laptop browser:
 
 | URL | Expected |
 |---|---|
-| `http://vault.yourdomain.com` | Vaultwarden login page |
-| `http://immich.yourdomain.com` | Immich web UI |
-| `http://pdf.yourdomain.com` | Stirling-PDF dashboard |
-| `http://status.yourdomain.com` | Uptime Kuma dashboard |
-| `http://portainer.yourdomain.com` | Portainer login |
-| `http://nginx.yourdomain.com` | Nginx PM admin |
-| `http://adguard.yourdomain.com` | AdGuard Home admin |
+| `https://vault.yourdomain.com` | Vaultwarden login page |
+| `https://immich.yourdomain.com` | Immich web UI |
+| `https://pdf.yourdomain.com` | Stirling-PDF dashboard |
+| `https://status.yourdomain.com` | Uptime Kuma dashboard |
+| `https://portainer.yourdomain.com` | Portainer login |
+| `https://traefik.yourdomain.com` | Traefik dashboard |
+| `https://adguard.yourdomain.com` | AdGuard Home admin |
 
-All should load through Nginx PM ✅
+All should load with a valid HTTPS certificate (issued by Let's Encrypt via Cloudflare DNS challenge) ✅
 
 ---
 
@@ -729,21 +830,11 @@ All should load through Nginx PM ✅
 
 | Service | Data | Frequency | Method |
 |---|---|---|---|
-| Vaultwarden | `vw-data/` | Daily at 2 AM | rclone → B2 |
-| Immich | `library/` | Weekly (planned) | rclone → B2 |
+| Vaultwarden | `vw-data/` | Daily at 2 AM | restic → B2 (Object Lock) |
+| Immich | `library/` | Weekly (planned) | restic → B2 (Object Lock) |
 
-**Backblaze B2 path structure:**
-```
-homelab-backups/
-  ├── vaultwarden/
-  │   ├── 2026-04-25/
-  │   ├── 2026-04-26/
-  │   └── ... (last 30 days)
-  └── immich/
-      └── ... (last 4 weeks, when configured)
-```
-
-**B2 free tier:** 10 GB — Vaultwarden data is small (~100 MB). Immich uploads use more space.
+**restic snapshot retention policy:** 30 daily + 12 monthly snapshots
+Restic deduplicates across snapshots — only changed chunks are uploaded each run.
 
 #### Manual Backups
 
@@ -772,21 +863,25 @@ Phase 3 — Core Services
 [ ] Vaultwarden running: http://192.168.1.101:8080
 [ ] Vaultwarden admin account created
 [ ] Vaultwarden USB backup done (encrypted JSON exported)
-[ ] Rclone configured for B2: rclone lsd backblaze-b2:
-[ ] B2 backup script created: /opt/vaultwarden/backup-to-b2.sh
-[ ] B2 backup tested manually: script runs without error
+[ ] restic installed in CT101: restic version
+[ ] B2 bucket created with Object Lock (Governance mode)
+[ ] /etc/restic-b2.env created with chmod 600
+[ ] restic repo initialised: restic -r b2:homelab-backups:/vaultwarden snapshots
+[ ] Backup tested manually: script runs without error
+[ ] Restore tested: /tmp/vw-restore/opt/vaultwarden/vw-data/db.sqlite3 exists
 [ ] Cron job set for daily backup at 2 AM
 [ ] Immich running: http://192.168.1.101:2283 (3 containers: server, db, redis)
 [ ] Immich admin account created
 [ ] Stirling-PDF running: http://192.168.1.101:8081
 [ ] Uptime Kuma running: http://192.168.1.101:3001
 [ ] All service monitors added to Uptime Kuma
-[ ] All proxy hosts added in Nginx PM
-[ ] vault.yourdomain.com → Vaultwarden ✅
-[ ] immich.yourdomain.com → Immich ✅
-[ ] pdf.yourdomain.com → Stirling-PDF ✅
-[ ] status.yourdomain.com → Uptime Kuma ✅
-[ ] portainer.yourdomain.com → Portainer ✅
+[ ] /opt/traefik/config/services.yml populated with all 5 routes on CT100
+[ ] Traefik dashboard shows all routers as Enabled: https://traefik.yourdomain.com
+[ ] https://vault.yourdomain.com → Vaultwarden ✅ (valid HTTPS cert)
+[ ] https://immich.yourdomain.com → Immich ✅
+[ ] https://pdf.yourdomain.com → Stirling-PDF ✅
+[ ] https://status.yourdomain.com → Uptime Kuma ✅
+[ ] https://portainer.yourdomain.com → Portainer ✅
 ```
 
 ---
@@ -813,15 +908,31 @@ df -h /var/lib/docker
 
 ---
 
-### Problem: Nginx PM shows 502 Bad Gateway via vault.yourdomain.com
+### Problem: Traefik shows 502 Bad Gateway for a service URL
 
-**Cause:** Vaultwarden container not running, or Nginx PM pointing to wrong port
+**Cause:** Service not running on CT101, wrong port in `services.yml`, or `services.yml` YAML syntax error
 
 **Solutions:**
-1. Verify Vaultwarden is running: `docker ps | grep vaultwarden`
-2. Check Vaultwarden logs: `docker logs vaultwarden`
-3. In Nginx PM → `vault.yourdomain.com` proxy host → verify Forward Port is `8080`
-4. Test direct access: `http://192.168.1.101:8080` (bypassing Nginx)
+```bash
+# 1. Verify the service is running on CT101
+ssh root@192.168.1.101
+docker ps | grep SERVICE_NAME
+
+# 2. Test direct access (bypassing Traefik entirely)
+curl http://192.168.1.101:PORT
+# If this fails: the service itself is down, not a Traefik issue
+
+# 3. Check services.yml on CT100 has the correct port
+ssh root@192.168.1.100
+cat /opt/traefik/config/services.yml | grep -A3 SERVICE_NAME
+
+# 4. Check Traefik picked up the config (no YAML parse errors)
+docker logs traefik 2>&1 | tail -30 | grep -i "error\|warn"
+
+# 5. Validate YAML syntax
+python3 -c "import yaml; yaml.safe_load(open('/opt/traefik/config/services.yml'))"
+# No output = valid YAML
+```
 
 ---
 
@@ -835,29 +946,37 @@ df -h /var/lib/docker
 
 ---
 
-### Problem: rclone backup fails with "Access denied"
+### Problem: restic backup fails
 
-**Cause:** B2 Application Key permissions or wrong key configured
+**Cause:** Wrong credentials, B2 connectivity issue, or repo not initialised
 
 **Solutions:**
 ```bash
-rclone lsd backblaze-b2:
-# If this fails: re-run rclone config to re-enter credentials
-rclone config show backblaze-b2
-```
+source /etc/restic-b2.env
 
-Verify the key has `listBuckets`, `listFiles`, `readFiles`, `writeFiles` capabilities in B2 dashboard.
+# Test B2 connectivity
+restic -r b2:homelab-backups:/vaultwarden snapshots
+# If this errors with "wrong password": RESTIC_PASSWORD in .env is wrong
+# If this errors with "unauthorized": B2_ACCOUNT_ID or B2_ACCOUNT_KEY is wrong
+
+# Re-check credentials in B2 dashboard:
+# Account → Application Keys → verify key is still active
+
+# If repo is missing (first run):
+restic -r b2:homelab-backups:/vaultwarden init
+```
 
 ---
 
 ### Problem: `*.yourdomain.com` URL loads but shows wrong service
 
-**Cause:** pfSense host override pointing to wrong IP, or Nginx PM proxy host misconfigured
+**Cause:** pfSense host override pointing to wrong IP, or Traefik label has wrong router name/hostname
 
 **Solutions:**
-1. `nslookup vault.lan` → verify it returns `192.168.1.100` (Nginx PM, not CT101 directly)
-2. In Nginx PM → `vault.yourdomain.com` proxy host → confirm Forward IP = `192.168.1.101`, Port = `8080`
-3. In pfSense → DNS Resolver → Host Overrides → all service entries should have Domain = `yourdomain.com` and IP = `192.168.1.100`
+1. `nslookup vault.yourdomain.com` → verify it returns `192.168.1.100` (Traefik host, not CT101 directly)
+2. Check Traefik dashboard → **HTTP** → **Routers** → verify `vault` router rule shows `Host(\`vault.yourdomain.com\`)`
+3. Check `services.yml` on CT100: `cat /opt/traefik/config/services.yml | grep -A2 vault`
+4. In pfSense → DNS Resolver → Host Overrides → all service entries should have Domain = `yourdomain.com` and IP = `192.168.1.100`
 
 ---
 
