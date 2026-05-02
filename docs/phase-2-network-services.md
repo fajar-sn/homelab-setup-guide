@@ -1,10 +1,10 @@
 # Homelab Setup Guide — Phase 2
 ## Network Services
 
-**Target:** Create LXC containers, deploy AdGuard Home DNS server, and Nginx Proxy Manager
+**Target:** Create LXC containers, deploy AdGuard Home DNS server, and Traefik reverse proxy
 **Timeframe:** Day 2 (2–3 hours)
 **Prerequisite:** [Phase 1 — Proxmox Installation](phase-1-proxmox-installation.md) complete, Proxmox at `https://192.168.1.10:8006`
-**Outcome:** CT100 (`network-svc`, 192.168.1.100) running AdGuard Home + Nginx PM; CT101 (`core-svc`, 192.168.1.101) ready for Docker services
+**Outcome:** CT100 (`network-svc`, 192.168.1.100) running AdGuard Home + Traefik; CT101 (`core-svc`, 192.168.1.101) ready for Docker services
 **Next:** [Phase 3 — Core Services](phase-3-core-services.md)
 
 ---
@@ -19,7 +19,7 @@
 6. [Create Core Services Container (CT101)](#step-25-create-core-services-container-id-101)
 7. [Install AdGuard Home](#step-26-install-adguard-home-system-service)
 8. [DNS Architecture](#step-27-dns-architecture--pfsense-primary-adguard-backup)
-9. [Install Nginx Proxy Manager](#step-28-install-nginx-proxy-manager)
+9. [Install Traefik](#step-28-install-traefik)
 10. [Testing & Verification](#testing--verification-checklist)
 11. [Troubleshooting](#troubleshooting)
 
@@ -38,9 +38,9 @@
 │  │ LXC CT100: Network Services (1GB RAM) [system service]  │    │
 │  │ IP: 192.168.1.100                                       │    │
 │  │ ┌──────────────────────────┐  ┌────────────────────────┐│    │
-│  │ │ AdGuard Home             │  │ Nginx Proxy Manager    ││    │
+│  │ │ AdGuard Home             │  │ Traefik                ││    │
 │  │ │ DNS port: 53             │  │ HTTP(S) reverse proxy  ││    │
-│  │ │ Admin: port 3000         │  │ Port 80, 443, 81       ││    │
+│  │ │ Admin: port 3000         │  │ Port 80, 443, 8080     ││    │
 │  │ └──────────────────────────┘  └────────────────────────┘│    │
 │  └─────────────────────────────────────────────────────────┘    │
 │                                                                  │
@@ -56,7 +56,7 @@
 
 | Container | ID | IP | RAM | Storage | Purpose |
 |---|---|---|---|---|---|
-| Network Services | CT100 | 192.168.1.100 | 1 GB | 20 GB | AdGuard Home + Nginx PM |
+| Network Services | CT100 | 192.168.1.100 | 1 GB | 20 GB | AdGuard Home + Traefik |
 | Core Services | CT101 | 192.168.1.101 | 4 GB | 50 GB | Docker services (Phase 3) |
 
 ### DNS Architecture
@@ -521,19 +521,19 @@ Add each entry:
 |---|---|---|---|
 | `homelab` | `yourdomain.com` | `192.168.1.10` | Proxmox management |
 | `adguard` | `yourdomain.com` | `192.168.1.100` | AdGuard Home admin |
-| `nginx` | `yourdomain.com` | `192.168.1.100` | Nginx Proxy Manager |
-| `vault` | `yourdomain.com` | `192.168.1.100` | Vaultwarden (via Nginx) |
-| `immich` | `yourdomain.com` | `192.168.1.100` | Immich (via Nginx) |
-| `pdf` | `yourdomain.com` | `192.168.1.100` | Stirling-PDF (via Nginx) |
-| `status` | `yourdomain.com` | `192.168.1.100` | Uptime Kuma (via Nginx) |
-| `portainer` | `yourdomain.com` | `192.168.1.101` | Portainer (via Nginx) |
+| `traefik` | `yourdomain.com` | `192.168.1.100` | Traefik dashboard |
+| `vault` | `yourdomain.com` | `192.168.1.100` | Vaultwarden (via Traefik) |
+| `immich` | `yourdomain.com` | `192.168.1.100` | Immich (via Traefik) |
+| `pdf` | `yourdomain.com` | `192.168.1.100` | Stirling-PDF (via Traefik) |
+| `status` | `yourdomain.com` | `192.168.1.100` | Uptime Kuma (via Traefik) |
+| `portainer` | `yourdomain.com` | `192.168.1.100` | Portainer (via Traefik) |
 
 For each entry: **Host** + **Domain** + **IP** → **Save** → when all done, click **Apply Changes**
 
 **Verify resolution from laptop:**
 ```bash
 nslookup vault.yourdomain.com 192.168.1.1
-# Should return 192.168.1.100 (your internal Nginx PM IP, NOT Cloudflare's public IP)
+# Should return 192.168.1.100 (your internal Traefik IP, NOT Cloudflare's public IP)
 ```
 
 > **This is split-DNS in action:** pfSense intercepts `vault.yourdomain.com` and returns the internal IP. The query never reaches Cloudflare's public DNS.
@@ -576,10 +576,10 @@ All other devices remain on pfSense DNS.
 
 ---
 
-### Step 2.8: Install Nginx Proxy Manager
+### Step 2.8: Install Traefik
 
-> **Goal:** Reverse proxy that routes traffic from clean URLs to internal services + handles SSL.
-> **Why:** Services are on different ports (8080, 2283, 8081, etc.). Nginx unifies them behind clean `*.yourdomain.com` URLs — the same URLs that will work externally via Cloudflare Tunnel in Phase 4.
+> **Goal:** Docker-native reverse proxy that auto-discovers services via container labels and handles SSL.
+> **Why Traefik instead of Nginx Proxy Manager:** Services declare their own routing in `docker-compose.yml` labels. No GUI clicking required. Every route change is a code change — reviewable in Git and consistent with how real DevOps environments work. CNCF-listed, 50k+ GitHub stars.
 
 #### 2.8.1: Install Docker in Network Services Container
 
@@ -606,68 +606,168 @@ docker run hello-world
 
 **Expected:** Container runs and prints "Hello from Docker!"
 
-#### 2.8.3: Create Docker Compose for Nginx PM
+#### 2.8.3: Create the shared proxy network
+
+All services that Traefik proxies must be on the same Docker network:
 
 ```bash
-mkdir -p /opt/nginx-pm
-cd /opt/nginx-pm
+docker network create proxy
 ```
 
-Create `docker-compose.yml`:
+#### 2.8.4: Get your Cloudflare API Token
+
+Traefik uses Cloudflare DNS challenge to issue Let's Encrypt certificates for your internal `*.yourdomain.com` domains (no port 80 exposure needed).
+
+1. Cloudflare dashboard → **My Profile** → **API Tokens** → **Create Token**
+2. Use template: **Edit zone DNS**
+3. **Zone Resources:** Include → Specific zone → `yourdomain.com`
+4. Click **Continue to summary** → **Create Token**
+5. Copy the token — you will only see it once
+
+Store it in Vaultwarden once deployed, and also in `/opt/traefik/.env` now.
+
+#### 2.8.5: Create Traefik directory and config files
+
+```bash
+mkdir -p /opt/traefik/letsencrypt /opt/traefik/config
+cd /opt/traefik
+touch letsencrypt/acme.json
+chmod 600 letsencrypt/acme.json
+```
+
+Create `/opt/traefik/.env`:
+
+```bash
+cat > .env << 'EOF'
+CLOUDFLARE_API_TOKEN=your_cloudflare_api_token_here
+EOF
+
+chmod 600 .env
+```
+
+Create `/opt/traefik/docker-compose.yml`:
 
 ```bash
 cat > docker-compose.yml << 'EOF'
-version: '3.8'
-
 services:
-  npm:
-    image: 'jc21/nginx-proxy-manager:latest'
-    container_name: nginx-proxy-manager
-    restart: always
+  traefik:
+    image: traefik:v3
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      - "--api.dashboard=true"
+      - "--api.insecure=false"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.file.directory=/config"
+      - "--providers.file.watch=true"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.cloudflare.acme.dnschallenge=true"
+      - "--certificatesresolvers.cloudflare.acme.dnschallenge.provider=cloudflare"
+      - "--certificatesresolvers.cloudflare.acme.email=you@example.com"
+      - "--certificatesresolvers.cloudflare.acme.storage=/letsencrypt/acme.json"
     ports:
-      - '80:80'
-      - '443:443'
-      - '81:81'
-    environment:
-      DB_SQLITE_FILE: "/data/database.sqlite"
+      - "80:80"
+      - "443:443"
     volumes:
-      - ./data:/data
-      - ./letsencrypt:/etc/letsencrypt
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./letsencrypt:/letsencrypt
+      - ./config:/config
+    environment:
+      - CF_DNS_API_TOKEN=${CLOUDFLARE_API_TOKEN}
     networks:
-      - npm-network
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dashboard.rule=Host(`traefik.yourdomain.com`)"
+      - "traefik.http.routers.dashboard.entrypoints=websecure"
+      - "traefik.http.routers.dashboard.tls.certresolver=cloudflare"
+      - "traefik.http.routers.dashboard.service=api@internal"
+      # Restrict dashboard to LAN only
+      - "traefik.http.routers.dashboard.middlewares=lan-only"
+      - "traefik.http.middlewares.lan-only.ipallowlist.sourcerange=192.168.1.0/24"
 
 networks:
-  npm-network:
-    driver: bridge
+  proxy:
+    external: true
 EOF
 ```
 
-#### 2.8.4: Start Nginx PM
+> **Replace** `you@example.com` with your real email (used for Let's Encrypt expiry notices).
+> **Replace** `yourdomain.com` throughout with your actual domain.
+
+#### 2.8.5b: Create initial services.yml (file provider config)
+
+This file defines routes for services running on CT101. Traefik watches it and hot-reloads on every save — no restart needed.
+
+```bash
+cat > /opt/traefik/config/services.yml << 'EOF'
+# Traefik file provider — cross-host routes for CT101 services
+# Add a router + service block for each new service
+# Changes here take effect immediately (watch=true)
+http:
+  routers: {}
+  services: {}
+EOF
+```
+
+> **Why a file instead of Docker labels?** Traefik's Docker provider can only discover containers on the **same Docker daemon** it's connected to. CT101 is a separate host with its own Docker daemon. Labels on CT101 containers are invisible to Traefik on CT100. The file provider is the correct approach for cross-host routing.
+
+#### 2.8.6: Start Traefik
 
 ```bash
 docker-compose up -d
+docker logs traefik
 ```
 
-Wait ~30 seconds for the container to start.
-
-#### 2.8.5: Access Nginx PM Admin Panel
-
-From laptop browser:
+**Expected in logs (within 60 seconds):**
 ```
-http://192.168.1.100:81
+time="..." level=info msg="Configuration loaded from flags."
+time="..." level=info msg="Starting provider aggregator"
 ```
 
-**Default login:**
-```
-Email:    admin@example.com
-Password: changeme
+No errors = Traefik is running. Certificate issuance happens automatically when the first service with a cert resolver is deployed in Phase 3.
+
+#### 2.8.7: Verify Traefik is listening
+
+```bash
+ss -tlnp | grep -E '80|443'
+# Expected: 0.0.0.0:80 and 0.0.0.0:443 both listening
 ```
 
-**Change credentials immediately:**
-1. Top right → **User** → **Change password**
-2. Set strong password: `NginxPM@2026!Admin`
+#### 2.8.8: How to add a new service to Traefik (reference)
 
-✅ Nginx PM is running and ready. Proxy hosts will be added in Phase 3 once services are deployed.
+Services on CT101 run on a **different Docker daemon** — Traefik cannot read their container labels. Routes are defined in `/opt/traefik/config/services.yml` on CT100. Traefik hot-reloads this file on every change — no restart required.
+
+To route a new service, append a router + service block to `services.yml`:
+
+```yaml
+http:
+  routers:
+    SERVICE_NAME:
+      rule: "Host(`SERVICE_NAME.yourdomain.com`)"
+      entryPoints: [websecure]
+      tls:
+        certResolver: cloudflare
+      service: SERVICE_NAME-svc
+
+  services:
+    SERVICE_NAME-svc:
+      loadBalancer:
+        servers:
+          - url: "http://192.168.1.101:PORT"
+```
+
+**Rules:**
+- `SERVICE_NAME` must be unique across all routers and services
+- `PORT` is the host port CT101 exposes (e.g. `8080` for Vaultwarden)
+- The CT101 `docker-compose.yml` needs **no labels** and **no proxy network** — the service just needs to be accessible on `192.168.1.101:PORT`
+- Full `services.yml` with all Phase 3 services is in Phase 3 Step 3.8
+
+✅ Traefik is running and ready. Add routes in `config/services.yml` on CT100 — they go live immediately.
 
 ---
 
@@ -682,8 +782,10 @@ Password: changeme
 [ ] pfSense host overrides added and applied
 [ ] nslookup vault.yourdomain.com 192.168.1.1 → returns 192.168.1.100 (internal IP, not Cloudflare)
 [ ] pfSense DHCP DNS is 192.168.1.1 (NOT 192.168.1.100)
-[ ] Nginx PM accessible: http://192.168.1.100:81
-[ ] Nginx PM default credentials changed
+[ ] Traefik running: docker ps | grep traefik → shows "Up"
+[ ] Traefik listening on 80 and 443: ss -tlnp | grep -E '80|443'
+[ ] proxy Docker network exists: docker network ls | grep proxy
+[ ] /opt/traefik/letsencrypt/acme.json has chmod 600
 ```
 
 ---
@@ -719,14 +821,42 @@ Password: changeme
 
 ---
 
-### Problem: Nginx PM default credentials rejected
+### Problem: Traefik container exits immediately on start
 
-**Cause:** Container may not be fully initialized yet
+**Cause:** Usually a YAML syntax error in `docker-compose.yml` or missing `acme.json` permissions
 
 **Solutions:**
-1. Wait 30–60 seconds, try again
-2. Check container: `docker logs nginx-proxy-manager`
-3. Restart container: `docker-compose restart` in `/opt/nginx-pm`
+```bash
+# Check Traefik logs
+docker logs traefik
+
+# Verify acme.json has correct permissions (must be 600 or Traefik refuses to start)
+ls -la /opt/traefik/letsencrypt/acme.json
+# If wrong: chmod 600 /opt/traefik/letsencrypt/acme.json
+
+# Verify .env file has the token set
+cat /opt/traefik/.env
+# Should show: CLOUDFLARE_API_TOKEN=...
+```
+
+---
+
+### Problem: Traefik dashboard not accessible at traefik.yourdomain.com
+
+**Cause:** Either pfSense host override not added, or certificate not yet issued
+
+**Solutions:**
+```bash
+# Check Traefik logs for certificate errors
+docker logs traefik 2>&1 | grep -i "error\|cert\|acme"
+
+# Verify pfSense host override for traefik.yourdomain.com → 192.168.1.100 was added
+# pfSense → Services → DNS Resolver → Host Overrides
+
+# Certificate issuance can take 1–2 minutes on first deploy
+# Check acme.json is being populated:
+cat /opt/traefik/letsencrypt/acme.json | python3 -m json.tool | grep -i domain
+```
 
 ---
 
@@ -737,8 +867,8 @@ Password: changeme
 **Phase 3 — Core Services:**
 - Install Docker in CT101
 - Deploy Portainer, Vaultwarden, Immich, Stirling-PDF, Uptime Kuma
-- Configure B2 backup for Vaultwarden
-- Add proxy hosts in Nginx PM for all services
+- Configure restic + B2 Object Lock backup for Vaultwarden
+- Each service already includes Traefik labels — routes go live automatically on `docker compose up`
 
 See: [phase-3-core-services.md](phase-3-core-services.md)
 
