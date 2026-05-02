@@ -105,21 +105,23 @@ ls $env:USERPROFILE\.ssh\
 ```
 
 **Look for files:**
-- `id_rsa` (private key) — keep this SECRET
-- `id_rsa.pub` (public key) — can be shared
+- `id_ed25519` (private key) — keep this SECRET
+- `id_ed25519.pub` (public key) — can be shared
 
 **If both exist:** Skip to Step 2.1.4.
 
 #### 2.1.2: Generate New SSH Key Pair
 
+> **Algorithm:** Use `ed25519` — current industry best practice. Smaller key, faster, more secure than RSA-4096. Use RSA only if the remote host is too old to support ed25519 (rare).
+
 **Linux/Mac:**
 ```bash
-ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa -C "youremail@gmail.com"
+ssh-keygen -t ed25519 -C "your-device-name"
 ```
 
 **Windows (PowerShell):**
 ```powershell
-ssh-keygen -t rsa -b 4096 -f $env:USERPROFILE\.ssh\id_rsa -C "youremail@gmail.com"
+ssh-keygen -t ed25519 -C "your-device-name"
 ```
 
 **Prompts:**
@@ -132,24 +134,24 @@ Enter same passphrase again: [confirm]
 
 **Linux/Mac:**
 ```bash
-cat ~/.ssh/id_rsa.pub
+cat ~/.ssh/id_ed25519.pub
 ```
 
 **Windows (PowerShell):**
 ```powershell
-cat $env:USERPROFILE\.ssh\id_rsa.pub
+cat $env:USERPROFILE\.ssh\id_ed25519.pub
 ```
 
 **Output shows public key:**
 ```
-ssh-rsa AAAAB3NzaC1yc2EA... youremail@gmail.com
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5... your-device-name
 ```
 
 **Copy this entire line — you'll paste it into Proxmox.**
 
 **⚠️ IMPORTANT:**
-- **Private key** (`id_rsa`) → Keep SECRET, never share, never commit to Git
-- **Public key** (`id_rsa.pub`) → Safe to share, paste into servers
+- **Private key** (`id_ed25519`) → Keep SECRET, never share, never commit to Git
+- **Public key** (`id_ed25519.pub`) → Safe to share, paste into servers
 
 ---
 
@@ -168,11 +170,11 @@ chmod 700 ~/.ssh
 
 ```bash
 cat >> ~/.ssh/authorized_keys << 'EOF'
-ssh-rsa AAAAB3NzaC1yc2EA... youremail@gmail.com
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5... your-device-name
 EOF
 ```
 
-**Replace `ssh-rsa AAAAB3NzaC1yc2EA...` with your actual public key from Step 2.1.3**
+**Replace `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5...` with your actual public key from Step 2.1.3**
 
 > **Multiple devices:** `authorized_keys` holds one key per line and supports any number of keys. The `>>` operator appends without overwriting existing entries — repeat this command for each device.
 

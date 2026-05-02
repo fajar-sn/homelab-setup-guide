@@ -100,15 +100,32 @@ sudo tailscale up
 
 Once connected, your device gets a `100.x.x.x` address and the subnet route `192.168.1.0/24` becomes reachable.
 
-### 3. Re-generate your SSH key (or copy an existing one)
+### 3. Set up SSH key on this device
 
-**Option A — New key on this device:**
+#### Algorithm note
+
+Use **ed25519** — it is the current industry best practice. It produces smaller keys, is faster, and is more resistant to side-channel attacks than RSA. RSA-4096 is still acceptable on legacy systems that do not support ed25519, but there is no reason to prefer it on modern hardware.
+
+| Algorithm | Recommendation | Notes |
+|---|---|---|
+| `ed25519` | ✅ Use this | Current standard, fast, compact |
+| `rsa -b 4096` | ⚠️ Legacy fallback | Only if the remote host is very old |
+| `ecdsa` | ✅ Acceptable | Rarely needed; ed25519 is preferred |
+| `dsa` / `rsa -b 1024` | ❌ Do not use | Cryptographically broken |
+
+#### Option A — Generate a new key on this device
 
 ```bash
 ssh-keygen -t ed25519 -C "your-device-name"
 ```
 
-Then add the public key to the Proxmox host and both containers:
+Get your new public key:
+
+```bash
+cat ~/.ssh/id_ed25519.pub
+```
+
+Copy the entire output line. Then append it to `authorized_keys` on each host (this adds the key without removing existing ones):
 
 ```bash
 # Proxmox host
@@ -121,7 +138,13 @@ ssh-copy-id root@192.168.1.100
 ssh-copy-id root@192.168.1.101
 ```
 
-**Option B — Copy existing `~/.ssh/id_ed25519` from your old device** via a password manager or encrypted transfer (e.g., Vaultwarden → secure note).
+> `ssh-copy-id` appends your public key to `~/.ssh/authorized_keys` on the remote host — it does not overwrite existing keys. All previously authorized devices remain working.
+>
+> If password authentication has already been disabled on the server (hardened setup), you will need to append the key manually from a device that already has access — see [Step 2.2.5 in Phase 2](docs/phase-2-network-services.md).
+
+#### Option B — Reuse your existing key from another device
+
+Copy `~/.ssh/id_ed25519` (private) and `~/.ssh/id_ed25519.pub` (public) from your old device via a password manager or encrypted transfer (e.g., Vaultwarden → secure note). No server changes needed — the public key is already in `authorized_keys`.
 
 ### 4. Verify LAN / Tailscale connectivity
 
