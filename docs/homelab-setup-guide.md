@@ -255,7 +255,7 @@ The Exploit — 3 steps:
                            └────────┬─────────┘
                                     │
                                     ▼
-                           Nginx Proxy Manager
+                           Traefik
                            → your services
 ```
 
@@ -413,7 +413,7 @@ The Exploit — 3 steps:
 │  │  │  LXC: Network Services        │  │  LXC: Tunnel/Access   │    │  │
 │  │  │  RAM: 1GB  [Mixed]            │  │  RAM: 0.5GB           │    │  │
 │  │  │  ┌───────────────────────┐    │  │  Tailscale router     │    │  │
-│  │  │  │ Nginx Proxy Manager   │    │  │  → WireGuard (Ph.2)   │    │  │
+│  │  │  │ Traefik               │    │  │  → WireGuard (Ph.2)   │    │  │
 │  │  │  │ cloudflared (Phase 1) │    │  └───────────────────────┘    │  │
 │  │  │  └───────────────────────┘    │                               │  │
 │  │  │  DNS: pfBlockerNG (pfSense)   │                               │  │
@@ -510,7 +510,7 @@ PHASE 2 (Sovereign VPS — WireGuard + Caddy)
                    │ OpenVPN server ✅     │
                    └───────────┬───────────┘
                                ▼
-                   Nginx Proxy Manager → services
+                   Traefik → services
 ```
 
 ---
@@ -601,32 +601,69 @@ Power on → F10 → Advanced → Device Options
 ```
 No ZFS = no snapshots = offsite backup is your ONLY safety net.
 
-┌──────────────────────────────────────────────────────────┐
-│  What MUST be backed up offsite (Backblaze B2 free 10GB) │
-├──────────────────────────────────────────────────────────┤
-│  Priority 1 — Vaultwarden /data/db.sqlite3               │
-│               → Rclone sync daily → B2                   │
-│               → If lost: all passwords gone forever      │
-├──────────────────────────────────────────────────────────┤
-│  Priority 2 — Immich /library                            │
-│               → Rclone sync weekly → B2                  │
-│               → Photos are irreplaceable                 │
-├──────────────────────────────────────────────────────────┤
-│  Priority 3 — Vaultwarden offline backup (USB)           │
-│               → Monthly export: Vaultwarden Admin        │
-│                 Panel → Export → encrypted JSON          │
-│               → Copy to USB drive → store offline        │
-│               → Offline copy protects against:           │
-│                 B2 outage, Vaultwarden corruption,       │
-│                 accidental cloud delete                  │
-├──────────────────────────────────────────────────────────┤
-│  Priority 4 — Proxmox LXC backup (vzdump)                │
-│               → Weekly to local NVMe /backup dir         │
-│               → Allows fast LXC restore                  │
-└──────────────────────────────────────────────────────────┘
+Tool:    restic  (NOT rclone — critical difference explained below)
+Backend: Backblaze B2 with Object Lock enabled
 
-Backblaze B2 free tier: 10GB storage, 1GB/day egress
-Rclone setup: rclone config → B2 → bucket per service
+WHY restic, NOT rclone:
+  rclone is a sync tool — it mirrors, it does NOT version:
+    Local: vault.db corrupts at 11:58 PM
+    rclone cron runs at midnight
+    B2 bucket: vault.db (corrupted) — good copy OVERWRITTEN ❌
+
+  restic is a backup tool — every run creates a new snapshot:
+    Local: vault.db corrupts at 11:58 PM
+    restic cron runs at midnight
+    B2 bucket: snapshot-001 (healthy, yesterday) ← STILL EXISTS ✅
+               snapshot-002 (corrupted, today)
+    Restore: restic restore snapshot-001 → vault.db recovered ✅
+
+WHY B2 Object Lock (ransomware + accidental delete protection):
+  Without Object Lock:
+    Attacker steals B2 API key → deletes all snapshots → gone forever ❌
+  With Object Lock (WORM — Write Once Read Many):
+    B2 REFUSES delete — locked objects cannot be removed by anyone,
+    including the account owner. Same model used by healthcare/finance
+    for tamper-proof retention. ✅
+
+┌──────────────────────────────────────────────────────────────────┐
+│  What MUST be backed up offsite (B2 + Object Lock)               │
+├──────────────────────────────────────────────────────────────────┤
+│  Priority 1 — Vaultwarden /data/db.sqlite3                       │
+│               → restic backup daily → B2 (Object Lock)          │
+│               → If lost: all passwords gone forever             │
+│               → restic policy: keep 30 daily, 12 monthly        │
+├──────────────────────────────────────────────────────────────────┤
+│  Priority 2 — Immich /library                                    │
+│               → restic backup weekly → B2 (Object Lock)         │
+│               → Photos are irreplaceable                        │
+│               → restic dedup: only changed chunks upload        │
+├──────────────────────────────────────────────────────────────────┤
+│  Priority 3 — Vaultwarden offline backup (USB)                   │
+│               → Monthly export: Vaultwarden Admin               │
+│                 Panel → Export → encrypted JSON                 │
+│               → Copy to USB drive → store securely offline      │
+│               → Protects against: B2 outage, corruption,        │
+│                 accidental cloud delete, ransomware             │
+├──────────────────────────────────────────────────────────────────┤
+│  Priority 4 — Proxmox LXC backup (vzdump)                        │
+│               → Weekly to local NVMe /backup dir                │
+│               → Allows fast LXC restore without internet        │
+└──────────────────────────────────────────────────────────────────┘
+
+Backblaze B2 paid: ~$1.20/month at 200GB (cheaper than Google Drive 200GB)
+B2 Object Lock:    enable per-bucket in B2 console — Governance or Compliance mode
+
+restic quickstart:
+  restic -r b2:your-bucket init                       ← create repo (one-time)
+  restic -r b2:your-bucket backup /opt/vaultwarden/data  ← backup
+  restic -r b2:your-bucket snapshots                  ← verify snapshots exist
+  restic -r b2:your-bucket check                      ← integrity check
+  restic -r b2:your-bucket restore latest --target /tmp/restore  ← test restore
+
+Cron (crontab -e):
+  0 2 * * *  restic -r b2:your-bucket backup /opt/vaultwarden/data  ← daily 2AM
+  0 3 * * 0  restic -r b2:your-bucket backup /opt/immich/library    ← weekly Sunday
+  0 4 * * 0  restic -r b2:your-bucket forget --keep-daily 30 --keep-monthly 12 --prune
 ```
 
 ---
@@ -655,7 +692,8 @@ Rclone setup: rclone config → B2 → bucket per service
 | PDF editor | Stirling-PDF | ✅ Install now |
 | Uptime monitor | Uptime Kuma | ✅ Install now |
 | Git hosting | GitHub (remote) | ✅ Use existing account |
-| CI/CD | Jenkins | ✅ Install now |
+| CI/CD (legacy) | Jenkins | ✅ Install now — learn enterprise Groovy DSL patterns |
+| CI/CD (modern) | GitHub Actions self-hosted runner | ✅ Install now — zero RAM idle, portfolio-ready |
 | Code quality | SonarQube | ✅ Install now |
 | IaC | Terraform CLI | ✅ Install now |
 | Config mgmt | Ansible CLI | ✅ Install now |
@@ -663,7 +701,7 @@ Rclone setup: rclone config → B2 → bucket per service
 | Dashboards | Grafana | ✅ Install now |
 | DNS Primary | pfBlockerNG (pfSense) | ✅ Already active — no action needed |
 | DNS Backup | AdGuard Home (LXC) | ✅ Install as fallback |
-| Reverse proxy | Nginx Proxy Manager | ✅ Install now |
+| Reverse proxy | Traefik | ✅ Install now |
 | Remote (Phase 1) | Tailscale | ✅ Install now |
 | Public URLs | Cloudflare Tunnel | ✅ Install now |
 | Remote (Phase 2) | WireGuard on VPS | ⏳ Month 3–6 |
@@ -686,14 +724,123 @@ Rclone setup: rclone config → B2 → bucket per service
 | **Tailscale** | ✅ Phase 1 | Replace with WireGuard in Phase 2 |
 | **Vaultwarden** | ✅ Keep | 50MB RAM. **Backup daily — non-negotiable** |
 | **Cloudflare Tunnel** | ✅ Phase 1 | Public URLs for dev/staging |
-| **Nginx Proxy Manager** | ✅ Keep | Internal reverse proxy |
+| **Traefik** | ✅ Replace NPM | Docker-native auto-discovery, CNCF-listed, GitOps-compatible |
 | **AdGuard Home** | ✅ Add as backup | Secondary DNS — fallback if pfBlockerNG fails |
 | **pfBlockerNG** | ✅ Already active | Primary DNS blocking on pfSense |
 | **Grafana + Prometheus** | ✅ Keep | 30-day retention on NVMe |
 | **Uptime Kuma** | ✅ Keep | Monitor disk usage alert at 70% |
 | **Teleport** | ❌ Replace | Tailscale SSH handles this at zero cost |
 | **Gitea** | ❌ Skip | Using GitHub instead — saves 20GB disk + RAM |
-| **Jenkins** | ✅ Add | CI/CD orchestration |
+| **Jenkins** | ✅ Add | Legacy CI/CD — learn Groovy DSL + enterprise patterns |
+| **GitHub Actions runner** | ✅ Add | Modern CI/CD — YAML-native, GitHub-integrated, zero RAM when idle |
+
+---
+
+### Traefik Setup & NPM → Traefik Migration
+
+**Why Traefik over Nginx Proxy Manager:**
+
+```
+NPM (GUI-first):
+  Deploy new container
+  → open NPM UI
+  → click "Add Proxy Host"
+  → type hostname, upstream IP, toggle SSL
+  → done
+  Config lives in a SQLite DB — not in files, not in Git.
+  Every new service = manual click. Zero GitOps compatibility.
+
+Traefik (code-first):
+  Deploy new container with labels in docker-compose.yml:
+    labels:
+      - "traefik.http.routers.myapp.rule=Host(`myapp.lan`)"
+      - "traefik.http.services.myapp.loadbalancer.server.port=8080"
+  → Traefik auto-discovers container, auto-provisions route
+  Config lives in docker-compose.yml alongside the service.
+  Git commit = config change. Reviewable, rollback-able. ✅
+```
+
+**Traefik docker-compose.yml (Network Services LXC):**
+```yaml
+# /opt/traefik/docker-compose.yml
+services:
+  traefik:
+    image: traefik:v3
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      - "--api.dashboard=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      # Let's Encrypt via Cloudflare DNS challenge (for *.lan internal certs)
+      - "--certificatesresolvers.cloudflare.acme.dnschallenge=true"
+      - "--certificatesresolvers.cloudflare.acme.dnschallenge.provider=cloudflare"
+      - "--certificatesresolvers.cloudflare.acme.email=you@example.com"
+      - "--certificatesresolvers.cloudflare.acme.storage=/letsencrypt/acme.json"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"        # Traefik dashboard (restrict to LAN only)
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./letsencrypt:/letsencrypt
+    environment:
+      - CF_API_TOKEN=${CLOUDFLARE_API_TOKEN}   # stored in .env file
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    external: true
+```
+
+**Adding a service to Traefik (example: Vaultwarden):**
+```yaml
+# in Vaultwarden's docker-compose.yml — add labels block:
+services:
+  vaultwarden:
+    image: vaultwarden/server:latest
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.vault.rule=Host(`vault.lan`)"
+      - "traefik.http.routers.vault.entrypoints=websecure"
+      - "traefik.http.routers.vault.tls.certresolver=cloudflare"
+      - "traefik.http.services.vault.loadbalancer.server.port=80"
+    networks:
+      - proxy   # must be on the same network as Traefik
+
+networks:
+  proxy:
+    external: true
+```
+Apply the same label pattern to: Immich, Stirling-PDF, Uptime Kuma, AdGuard Home, Portainer, Grafana, Jenkins, SonarQube.
+
+**Migration steps from NPM to Traefik:**
+```
+[ ] Step 1 — Deploy Traefik alongside NPM (both running, no downtime)
+    cd /opt/traefik && docker compose up -d
+    Access Traefik dashboard: http://[Network LXC IP]:8080
+
+[ ] Step 2 — Migrate services one at a time
+    For each service:
+      a. Add Traefik labels to its docker-compose.yml
+      b. Connect it to the "proxy" Docker network
+      c. docker compose up -d --force-recreate [service]
+      d. Test: curl -H "Host: service.lan" http://[Traefik IP]
+      e. Once confirmed working, remove the NPM proxy host for it
+
+[ ] Step 3 — Migrate cloudflared to point to Traefik
+    Update cloudflared tunnel config: upstream → http://[Traefik LXC IP]:80
+
+[ ] Step 4 — Stop and remove NPM
+    docker compose down   (in NPM directory)
+    NPM is fully replaced. ✅
+
+⚠️  Do NOT remove NPM until all services are confirmed working in Traefik.
+    Run both in parallel during migration (NPM on port 81 admin, Traefik on 80/443).
+```
 
 ### DNS Setup — pfBlockerNG Primary + AdGuard Home Backup
 ```
@@ -721,10 +868,10 @@ AdGuard Home config:
 Local *.lan overrides → add in pfSense:
   Services → DNS Resolver → Host Overrides
   proxmox.lan  → 192.168.1.10
-  vault.lan    → [NPM LXC IP]   (proxies to Vaultwarden)
-  immich.lan   → [NPM LXC IP]
-  pdf.lan      → [NPM LXC IP]
-  status.lan   → [NPM LXC IP]
+  vault.lan    → [Traefik LXC IP]   (proxies to Vaultwarden)
+  immich.lan   → [Traefik LXC IP]
+  pdf.lan      → [Traefik LXC IP]
+  status.lan   → [Traefik LXC IP]
   adguard.lan  → [Core Services LXC IP]
 ```
 
@@ -732,7 +879,35 @@ Local *.lan overrides → add in pfSense:
 
 ## 9. CI/CD Pipeline Architecture
 
-### Full Pipeline Flow
+### Jenkins vs GitHub Actions — Why You Need Both
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Run BOTH — each serves a different purpose                             │
+├──────────────────────────────────────┬──────────────────────────────────┤
+│  Jenkins (Path A)                    │  GitHub Actions runner (Path B)  │
+│  ─── Legacy CI/CD learning ───       │  ─── Modern industry standard ── │
+├──────────────────────────────────────┼──────────────────────────────────┤
+│  Groovy DSL (Jenkinsfile)            │  YAML (.github/workflows/*.yml)  │
+│  ~4GB RAM running 24/7               │  ~50MB idle, only runs on push   │
+│  Plugin ecosystem (650+ plugins)     │  Native GitHub integration       │
+│  Used by: banks, telecoms, legacy    │  Used by: Shopify, Vercel, most  │
+│  enterprise running Jenkins pre-2018 │  modern companies since 2020     │
+│  Stack Overflow 2024: declining      │  Stack Overflow 2024: #1 CI/CD   │
+│  Learn to understand legacy systems  │  Use for real projects/portfolio │
+│  you'll encounter at enterprise jobs │  Skills transfer to any job      │
+└──────────────────────────────────────┴──────────────────────────────────┘
+
+RAM impact on your 16GB setup:
+  Jenkins always on:      4GB consumed even with zero builds running
+  GHA runner idle:        ~50MB — activates only when GitHub dispatches a job
+  → Run SonarQube + Jenkins on-demand when RAM pressure hits
+  → GHA runner can stay on 24/7 at negligible cost
+```
+
+---
+
+### Path A: Jenkins Pipeline Flow
 
 ```
   Developer pushes code
@@ -807,6 +982,86 @@ pipeline {
     }
   }
 }
+```
+
+---
+
+### Path B: GitHub Actions Self-Hosted Runner Flow
+
+```
+  Developer pushes code
+         │
+         ▼
+  ┌──────────────┐
+  │ GitHub       │
+  │ (remote)     │
+  └──────┬───────┘
+         │ triggers .github/workflows/ci.yml
+         ▼
+  ┌──────────────────────────────────────────────────────────┐
+  │  GitHub Actions (cloud-side orchestration)               │
+  │  reads workflow YAML → routes job to self-hosted label   │
+  └──────────────────────────┬───────────────────────────────┘
+                             │ job dispatched to your server
+                             ▼
+  ┌──────────────────────────────────────────────────────────┐
+  │  GHA Self-Hosted Runner (Dev & CI/CD LXC)                │
+  │  (~50MB idle — only active when job dispatched)          │
+  │                                                          │
+  │  Step 1: Checkout                                        │
+  │  Step 2: Build                                           │
+  │  Step 3: Test                                            │
+  │  Step 4: SonarQube Scan                                  │
+  │          SONAR_TOKEN → stored as GitHub repo secret ✅   │
+  │          Quality Gate: PASS → continue / FAIL → abort   │
+  │  Step 5: Deploy (only on push to main)                   │
+  └──────────────────────────┬───────────────────────────────┘
+                             │
+                    ┌────────┴────────┐
+                    ▼                 ▼
+                Terraform         Ansible
+                apply             deploy.yml
+                    └────────┬────────┘
+                             ▼
+                   staging.yourdomain.com ✅
+```
+
+### GitHub Actions Workflow Sample
+```yaml
+# .github/workflows/ci.yml
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-test-scan:
+    runs-on: self-hosted        # routes to your homelab runner
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: mvn clean package -DskipTests
+
+      - name: Test
+        run: mvn test
+
+      - name: SonarQube Scan
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: http://192.168.1.x:9000   # internal LXC IP
+        run: mvn sonar:sonar -Dsonar.login=$SONAR_TOKEN
+
+  deploy:
+    needs: build-test-scan
+    if: github.ref == 'refs/heads/main'
+    runs-on: self-hosted
+    steps:
+      - name: Deploy to Staging
+        run: ansible-playbook -i inventory/staging deploy.yml
 ```
 
 ---
@@ -933,14 +1188,14 @@ Notification: Telegram bot (easiest to set up)
 ### Phase 2 — Network Services (Day 2)
 ```
 [ ] Create Network Services LXC (1GB RAM)
-[ ] Install Nginx Proxy Manager (Docker)
+[ ] Install Traefik (Docker) — see NPM → Traefik guide in Section 8
 [ ] Add local DNS overrides in pfSense:
     Services → DNS Resolver → Host Overrides
     → proxmox.lan  → 192.168.1.10
-    → vault.lan    → [NPM LXC IP]
-    → immich.lan   → [NPM LXC IP]
-    → pdf.lan      → [NPM LXC IP]
-    → status.lan   → [NPM LXC IP]
+    → vault.lan    → [Traefik LXC IP]
+    → immich.lan   → [Traefik LXC IP]
+    → pdf.lan      → [Traefik LXC IP]
+    → status.lan   → [Traefik LXC IP]
     → adguard.lan  → [Core Services LXC IP]
 [ ] Point your domain subdomains in Cloudflare DNS:
     → homelab.yourdomain.com  → (Phase 1: Cloudflare Tunnel)
@@ -954,7 +1209,10 @@ Notification: Telegram bot (easiest to set up)
 [ ] Create Core Services LXC (4GB RAM)
 [ ] Install Docker + Portainer
 [ ] Deploy Vaultwarden
-[ ] ⚠️ IMMEDIATELY set up Rclone → Backblaze B2 backup for Vaultwarden
+[ ] ⚠️ IMMEDIATELY set up restic → Backblaze B2 (Object Lock) backup for Vaultwarden
+    restic -r b2:vault-bucket init
+    restic -r b2:vault-bucket backup /opt/vaultwarden/data
+    restic -r b2:vault-bucket snapshots   ← verify it worked
 [ ] ⚠️ Set up monthly offline backup for Vaultwarden:
     Vaultwarden Admin Panel → Export Vault → Encrypted JSON
     → Copy exported file to USB drive → store securely offline
@@ -963,7 +1221,8 @@ Notification: Telegram bot (easiest to set up)
 [ ] Deploy Stirling-PDF
 [ ] Deploy Uptime Kuma
 [ ] Add Uptime Kuma disk usage monitor (alert at 70%)
-[ ] Configure Nginx PM: vault.lan, immich.lan, pdf.lan, status.lan, adguard.lan
+[ ] Configure Traefik Docker labels for: vault.lan, immich.lan, pdf.lan, status.lan, adguard.lan
+    (see Traefik setup in Section 8 — add labels to each service's docker-compose.yml)
 ```
 
 ### Phase 4 — Remote Access (Day 3–4)
@@ -973,23 +1232,43 @@ Notification: Telegram bot (easiest to set up)
 [ ] Install Tailscale on your devices + wife's devices
 [ ] Test remote access: Vaultwarden + Immich via Tailscale
 [ ] Deploy cloudflared in Network Services LXC
-[ ] Point dev.yourdomain.com → Nginx PM → dev service
+[ ] Point dev.yourdomain.com → Traefik → dev service
 ```
 
 ### Phase 5 — Dev & CI/CD (Week 2)
 ```
 [ ] Create Dev & CI/CD LXC (6GB RAM)
 [ ] Deploy SonarQube + PostgreSQL (Docker Compose)
+
+[ ] --- Path A: Jenkins (legacy CI/CD learning) ---
 [ ] Deploy Jenkins
 [ ] Configure Jenkins → GitHub integration:
     Jenkins → Manage Jenkins → Plugins → GitHub plugin
     Create GitHub Personal Access Token → add to Jenkins credentials
     Configure webhook on GitHub repo → http://[Jenkins IP]:8080/github-webhook/
 [ ] Connect Jenkins → SonarQube (SonarQube Scanner plugin)
-[ ] Create first pipeline: build → test → scan → quality gate
+[ ] Create first Jenkinsfile pipeline: build → test → scan → quality gate
+[ ] Set Jenkins artifact retention: keep last 10 builds only
+
+[ ] --- Path B: GitHub Actions self-hosted runner (modern CI/CD) ---
+[ ] In Dev LXC, create dedicated runner user:
+    useradd -m github-runner && su - github-runner
+[ ] Download + install runner (GitHub: repo → Settings → Actions → Runners → New self-hosted runner)
+    mkdir actions-runner && cd actions-runner
+    curl -o actions-runner-linux-x64.tar.gz -L [URL from GitHub UI]
+    tar xzf actions-runner-linux-x64.tar.gz
+[ ] Register runner:
+    ./config.sh --url https://github.com/[user]/[repo] --token [TOKEN from GitHub UI]
+[ ] Install + start as service (run as root):
+    ./svc.sh install github-runner
+    ./svc.sh start
+[ ] Add SONAR_TOKEN as GitHub repo secret:
+    Repo → Settings → Secrets and variables → Actions → New repository secret
+[ ] Add .github/workflows/ci.yml to repo (see Section 9 GHA sample)
+[ ] Verify: push a commit → Actions tab → runner picks up job ✅
+
 [ ] Install Terraform CLI + Ansible CLI
 [ ] Test: Terraform plan, Ansible ping
-[ ] Set Jenkins artifact retention: keep last 10 builds only
 ```
 
 ### Phase 6 — Monitoring (Week 2)
@@ -1011,8 +1290,12 @@ Notification: Telegram bot (easiest to set up)
 [ ] pfSense DNS Resolver: enable DNSSEC (Services → DNS Resolver → DNSSEC)
     → Unbound + pfBlockerNG support DNSSEC natively — no conflict
 [ ] pfSense firewall: restrict unnecessary rules
-[ ] Verify Backblaze B2 backup is running (check B2 console)
-[ ] Test restore: restore Vaultwarden from B2 backup (dry run)
+[ ] Verify restic backup is running:
+    restic -r b2:vault-bucket snapshots   ← must show at least one snapshot
+    restic -r b2:vault-bucket check       ← verify integrity, must show no errors
+[ ] Test restore (dry run — non-destructive):
+    restic -r b2:vault-bucket restore latest --target /tmp/vault-restore
+    ls /tmp/vault-restore   ← must show db.sqlite3 file
 ```
 
 ### Phase 8 — Cloud Staging (Month 2)
@@ -1022,6 +1305,7 @@ Notification: Telegram bot (easiest to set up)
 [ ] Store state in Terraform Cloud (free)
 [ ] Write Ansible deploy.yml
 [ ] Add to Jenkins pipeline: deploy to AWS/GCP after quality gate
+[ ] Add to GHA workflow: deploy job triggered on push to main (see Section 9 GHA sample)
 [ ] Test: staging.yourdomain.com → your app ✅
 ```
 
@@ -1542,7 +1826,7 @@ Server:         HP EliteDesk 800 G4 SFF (i5-8500, 16GB RAM now → 32GB later)
 Hypervisor:     Proxmox VE (bare metal)
 
 Storage NOW:    500GB M.2 NVMe only — no redundancy
-                Offsite backup via Rclone → Backblaze B2 is MANDATORY
+                Offsite backup via restic → Backblaze B2 (Object Lock) is MANDATORY
 
 Storage LATER:  2x 4TB WD Red Plus → ZFS mirror → TrueNAS Scale VM
                 Add when budget allows — migrate data with steps in Section 13
@@ -1550,11 +1834,11 @@ Storage LATER:  2x 4TB WD Red Plus → ZFS mirror → TrueNAS Scale VM
 Services:
   Core:         Immich (new photos only), Vaultwarden, Stirling-PDF, Uptime Kuma
                 AdGuard Home (backup DNS)
-  Dev/CI:       GitHub (remote) + Jenkins + SonarQube (run on-demand if RAM pressure)
+  Dev/CI:       GitHub (remote) + Jenkins (legacy) + GHA runner (modern) + SonarQube (on-demand)
   IaC:          Terraform CLI, Ansible CLI (no RAM cost when idle)
   Monitoring:   Prometheus (30d retention), Grafana
   DNS/Blocking: pfBlockerNG on pfSense (primary) + AdGuard Home LXC (backup)
-  Proxy:        Nginx Proxy Manager
+  Proxy:        Traefik (Docker-native auto-discovery, CNCF-listed)
 
 Remote Phase 1: Tailscale (private) + Cloudflare Tunnel (public URLs)
 Remote Phase 2: WireGuard VPS relay → sovereignty + OpenVPN restored
