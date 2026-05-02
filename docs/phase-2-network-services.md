@@ -174,6 +174,8 @@ EOF
 
 **Replace `ssh-rsa AAAAB3NzaC1yc2EA...` with your actual public key from Step 2.1.3**
 
+> **Multiple devices:** `authorized_keys` holds one key per line and supports any number of keys. The `>>` operator appends without overwriting existing entries — repeat this command for each device.
+
 #### 2.2.3: Set Correct Permissions
 
 ```bash
@@ -201,6 +203,33 @@ Are you sure you want to continue connecting? (yes/no/[fingerprint]):
 **Type:** `yes`
 
 **Expected:** Logged in without entering a password ✅
+
+#### 2.2.5: Add Keys for Additional Devices
+
+For each extra device (laptop, desktop, phone via Termux, etc.), get its public key and append it to the same file on every host you want it to access:
+
+```bash
+# On the new device — get the public key
+cat ~/.ssh/id_ed25519.pub
+# (or id_rsa.pub if RSA)
+```
+
+Then on each server (Proxmox host and/or containers), append it:
+
+```bash
+cat >> ~/.ssh/authorized_keys << 'EOF'
+ssh-ed25519 AAAAC3NzaC1lZDI1... device-name
+EOF
+```
+
+Verify all keys are present:
+
+```bash
+cat ~/.ssh/authorized_keys
+# Each line is one key — one per device
+```
+
+To revoke a device's access, delete its line from `authorized_keys`.
 
 ---
 
