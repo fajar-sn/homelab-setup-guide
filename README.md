@@ -65,13 +65,18 @@ Nginx Proxy Manager → CT101 Docker service
 
 ## Setup Phases
 
-| Phase | Guide | Status |
-|---|---|---|
-| Phase 0 — Preparation | [docs/phase-0-preparation.md](docs/phase-0-preparation.md) | |
-| Phase 1 — Proxmox Installation | [docs/phase-1-proxmox-installation.md](docs/phase-1-proxmox-installation.md) | |
-| Phase 2 — Network Services | [docs/phase-2-network-services.md](docs/phase-2-network-services.md) | |
-| Phase 3 — Core Services | [docs/phase-3-core-services.md](docs/phase-3-core-services.md) | |
-| Phase 4 — Remote Access (Tailscale) | [docs/phase-4-remote-access.md](docs/phase-4-remote-access.md) | |
+| Phase | Description | Guide | Status |
+|---|---|---|---|
+| **Phase 0** | Preparation — domain → Cloudflare, BIOS VT-x, download ISO, flash USB | [phase-0-preparation.md](docs/phase-0-preparation.md) | ✅ Written |
+| **Phase 1** | Proxmox Installation — install, network bridge, updates, storage | [phase-1-proxmox-installation.md](docs/phase-1-proxmox-installation.md) | ✅ Written |
+| **Phase 2** | Network Services — LXC containers, AdGuard Home, pfSense split-DNS, Nginx PM | [phase-2-network-services.md](docs/phase-2-network-services.md) | ✅ Written |
+| **Phase 3** | Core Services — Docker, Portainer, Vaultwarden, Immich, Stirling-PDF, Uptime Kuma | [phase-3-core-services.md](docs/phase-3-core-services.md) | ✅ Written |
+| **Phase 4** | Remote Access — Tailscale subnet router, split-DNS, access from anywhere | [phase-4-remote-access.md](docs/phase-4-remote-access.md) | ✅ Written |
+| **Phase 5** | Dev & CI/CD — Jenkins, SonarQube, GitHub webhooks, Terraform, Ansible | *(not yet written)* | 🔲 Planned |
+| **Phase 6** | Monitoring — Prometheus, Grafana, node_exporter, cAdvisor, Telegram alerts | *(not yet written)* | 🔲 Planned |
+| **Phase 7** | Hardening — 2FA everywhere, SSH key-only, DNSSEC, B2 restore drill | *(not yet written)* | 🔲 Planned |
+| **Phase 8** | Cloud Staging — Terraform AWS/GCP, Ansible deploy.yml, Jenkins pipeline gate | *(not yet written)* | 🔲 Planned |
+| **Phase 9** | VPS Migration — Hetzner VPS, WireGuard + Caddy, replace Tailscale | *(not yet written)* | 🔲 Planned |
 
 For full architecture notes, trade-off analysis, and the software decision guide, see [docs/homelab-setup-guide.md](docs/homelab-setup-guide.md).
 
@@ -300,3 +305,50 @@ Open **http://status.yourdomain.com** (Uptime Kuma) — all monitored services s
 - **NVMe-only risks.** There is no ZFS mirror, no RAID, no HDD fallback. A drive failure means total data loss. Plan HDD migration when budget allows.
 - **Prometheus retention** is capped at 30 days to prevent the NVMe from filling up. Do not raise this limit without adding storage first.
 - **Tailscale key expiry** must be disabled for the Proxmox subnet router node. If the key expires, remote access drops. Check Tailscale admin → machine settings → disable key expiry.
+
+---
+
+## Planned Additions
+
+For the full roadmap checklist, see [docs/homelab-setup-guide.md § Full Roadmap](docs/homelab-setup-guide.md#12-full-roadmap).
+
+### HDD Migration Plan
+
+Currently running **NVMe-only** — single point of failure, no redundancy, limited storage. Full migration plan: [docs/homelab-setup-guide.md § HDD Migration Plan](docs/homelab-setup-guide.md#13-hdd-migration-plan).
+
+**What is blocked until HDD arrives:**
+- Full Immich photo library import (new photos only for now)
+- Prometheus retention beyond 30 days
+- TrueNAS Scale VM (ZFS, SMB/NFS shares)
+- RAM upgrade to 32 GB (required before TrueNAS VM)
+
+**Migration stages:**
+
+| Stage | Trigger | What it unlocks |
+|---|---|---|
+| **Stage 0** ← current | NVMe only | B2 backup mandatory; constrained storage |
+| **Stage A** | 1st 4TB HDD + 32 GB RAM | TrueNAS VM, single-disk ZFS, data off NVMe, full Immich library |
+| **Stage B** | 2nd identical 4TB HDD | ZFS mirror (real redundancy), ZFS snapshots, relax B2 frequency |
+
+**Hardware to buy (in order, when budget allows):**
+1. 32 GB DDR4-2666 UDIMM kit — mandatory before TrueNAS VM
+2. WD Red Plus 4TB CMR — note the exact SKU; Stage B requires an identical drive
+3. PCIe SATA x1 card
+4. External 2-bay SATA enclosure — buy 2-bay now even with one drive
+
+---
+
+### Centralized Docker Management (Portainer CE + Agents)
+
+Full plan: [docs/plans/2026-04-26-13-22-plan-centralized-docker-management.md](docs/plans/2026-04-26-13-22-plan-centralized-docker-management.md)
+
+**Goal:** One Portainer Server in CT101 manages Docker across all LXC containers via lightweight Portainer Agents — single UI for deploying, updating, and monitoring containers on CT100, CT101, and any future LXC.
+
+**Current state:** Portainer CE in CT101 manages CT101's own containers only.
+
+**To implement (deferred until Phase 5 creates CT102):**
+1. Deploy `portainer/agent` container in CT100 on port `9001`
+2. When CT102 (dev/CI-CD) exists: deploy agent there too
+3. In Portainer UI → **Environments → Add environment → Agent** — register each container's IP + port `9001`
+
+**Why deferred:** CT102 doesn't exist yet. Setting up multi-container management before the full topology is stable adds unnecessary churn. Best done once after Phase 5.
