@@ -1021,11 +1021,11 @@ apt update
 **Phase 2 — Network Services:**
 - Generate SSH keys and add to Proxmox
 - Download Debian 12 LXC template
-- Create CT100 (network-svc, 192.168.1.100) — for AdGuard Home + Nginx PM
+- Create CT100 (network-svc, 192.168.1.100) — for AdGuard Home + Traefik
 - Create CT101 (core-svc, 192.168.1.101) — for all Docker services
 - Install AdGuard Home as systemd service
 - Configure pfSense DNS + host overrides for `*.yourdomain.com` internal subdomains (split-DNS)
-- Install Nginx Proxy Manager via Docker
+- Install Traefik via Docker
 
 See: [phase-2-network-services.md](phase-2-network-services.md)
 
