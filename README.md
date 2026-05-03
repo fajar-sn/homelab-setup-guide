@@ -19,16 +19,18 @@ Internet (IndiHome — CGNAT, no public IP)
     Tailscale subnet router (100.x.x.x mesh)
         │
         ├── LXC CT100: Network Services (192.168.1.100)
-        │       ├── AdGuard Home     — port 53 / admin :3000
-        │       └── Nginx Proxy Manager — ports 80, 443, 81
+        │       ├── AdGuard Home  — systemd service, port 53 / admin :3000
+        │       └── Traefik v3    — Docker, ports 80, 443 / dashboard :8080
         │
         └── LXC CT101: Core Services (192.168.1.101)
                 └── Docker
-                        ├── Portainer CE       — :9000 / :9443
-                        ├── Vaultwarden        — :8080  → vault.yourdomain.com
-                        ├── Immich             — :2283  → immich.yourdomain.com
-                        ├── Stirling-PDF       — :8081  → pdf.yourdomain.com
-                        └── Uptime Kuma        — :3001  → status.yourdomain.com
+                        ├── Portainer CE   — :9000 / :9443
+                        ├── Vaultwarden    — :8080  → vault.yourdomain.com
+                        ├── Immich         — :2283  → immich.yourdomain.com
+                        ├── Stirling-PDF   — :8081  → pdf.yourdomain.com
+                        ├── Uptime Kuma    — :3001  → status.yourdomain.com
+                        ├── Syncthing      — :8384 (LAN only)
+                        └── Memos          — :5230  → memos.yourdomain.com
 ```
 
 ### Remote Access
@@ -42,9 +44,9 @@ Remote device (phone / laptop)
 Tailscale mesh (100.x.x.x) ──► Proxmox subnet router
     │  route: 192.168.1.0/24
     ▼
-pfSense DNS: vault.yourdomain.com → 192.168.1.100
+pfSense DNS: vault.yourdomain.com → 192.168.1.100 (Traefik)
     ▼
-Nginx Proxy Manager → CT101 Docker service
+Traefik reads services.yml → forwards to CT101 Docker service
 ```
 
 ### Hardware & Storage
@@ -58,8 +60,65 @@ Nginx Proxy Manager → CT101 Docker service
 
 | Container | ID | IP | RAM | Disk | Purpose |
 |---|---|---|---|---|---|
-| Network Services | CT100 | 192.168.1.100 | 1 GB | 20 GB | AdGuard Home + Nginx PM |
-| Core Services | CT101 | 192.168.1.101 | 4 GB | 50 GB | Docker workloads |
+| Network Services | CT100 | 192.168.1.100 | 1 GB | 20 GB | AdGuard Home (systemd) + Traefik (Docker) |
+| Core Services | CT101 | 192.168.1.101 | 4 GB | 50 GB | Docker workloads (all user-facing services) |
+
+---
+
+## Tech Stack
+
+### Infrastructure
+
+| Layer | Technology | Role |
+|---|---|---|
+| Hypervisor | **Proxmox VE** | Runs LXC containers; web UI at `:8006` |
+| Containers | **LXC** (Proxmox) | Lightweight OS-level isolation per service group |
+| Container runtime | **Docker + Compose** | Runs all user-facing services inside CT101 |
+| Container UI | **Portainer CE** | Web UI for managing Docker containers |
+
+### Networking & DNS
+
+| Layer | Technology | Role |
+|---|---|---|
+| Router / firewall | **pfSense** | DHCP, firewall, split-DNS for `*.yourdomain.com` |
+| Primary DNS | **pfBlockerNG** (on pfSense) | Ad-blocking + malware DNS filter |
+| Backup DNS | **AdGuard Home** (CT100, systemd) | Fallback DNS if pfSense/pfBlockerNG has issues |
+| Reverse proxy | **Traefik v3** (CT100, Docker) | TLS termination, routes by hostname to CT101 services |
+| TLS certificates | **Let's Encrypt** (Cloudflare DNS challenge) | Wildcard cert for `*.yourdomain.com` |
+| Remote access | **Tailscale** | WireGuard mesh — CGNAT-safe, no open ports |
+| Public DNS | **Cloudflare** | Authoritative DNS for `yourdomain.com` |
+
+### Core Services (CT101)
+
+| Service | Technology | Purpose |
+|---|---|---|
+| Password manager | **Vaultwarden** | Self-hosted Bitwarden-compatible server |
+| Photo management | **Immich** | Google Photos replacement; Intel QuickSync ML |
+| PDF tools | **Stirling-PDF** | Merge, split, convert PDFs |
+| Uptime monitor | **Uptime Kuma** | Service health checks with Telegram alerts |
+| File sync | **Syncthing** | P2P encrypted sync: phone/laptop → server (Google Drive replacement) |
+| Quick notes | **Memos** | Google Keep replacement; lightweight, Docker-native |
+
+### Backup & Storage
+
+| Tool | Role |
+|---|---|
+| **restic** | Encrypted, deduplicated backup snapshots |
+| **Backblaze B2** | Offsite object storage (Object Lock enabled — ransomware-safe) |
+| `vzdump` (Proxmox) | Weekly LXC snapshots to local NVMe |
+
+### Planned (future phases)
+
+| Technology | Phase | Purpose |
+|---|---|---|
+| Jenkins | Phase 5 | Legacy CI/CD — Groovy DSL, enterprise patterns |
+| GitHub Actions (self-hosted runner) | Phase 5 | Modern CI/CD — zero RAM idle |
+| SonarQube | Phase 5 | Static code analysis |
+| Terraform | Phase 5 | IaC for cloud staging environments |
+| Ansible | Phase 5 | Configuration management |
+| Prometheus + Grafana | Phase 6 | Metrics, dashboards, Telegram alerts (30-day retention) |
+| TrueNAS Scale VM | After HDD | ZFS pool, SMB/NFS shares — blocked until HDD added |
+| Home Assistant (HaOS VM) | After 32 GB RAM | Home automation — blocked until RAM upgrade |
 
 ---
 
@@ -69,8 +128,8 @@ Nginx Proxy Manager → CT101 Docker service
 |---|---|---|---|
 | **Phase 0** | Preparation — domain → Cloudflare, BIOS VT-x, download ISO, flash USB | [phase-0-preparation.md](docs/phase-0-preparation.md) | ✅ Written |
 | **Phase 1** | Proxmox Installation — install, network bridge, updates, storage | [phase-1-proxmox-installation.md](docs/phase-1-proxmox-installation.md) | ✅ Written |
-| **Phase 2** | Network Services — LXC containers, AdGuard Home, pfSense split-DNS, Nginx PM | [phase-2-network-services.md](docs/phase-2-network-services.md) | ✅ Written |
-| **Phase 3** | Core Services — Docker, Portainer, Vaultwarden, Immich, Stirling-PDF, Uptime Kuma | [phase-3-core-services.md](docs/phase-3-core-services.md) | ✅ Written |
+| **Phase 2** | Network Services — LXC containers, AdGuard Home (systemd), Traefik (Docker), pfSense split-DNS | [phase-2-network-services.md](docs/phase-2-network-services.md) | ✅ Written |
+| **Phase 3** | Core Services — Docker, Portainer, Vaultwarden, Immich, Stirling-PDF, Uptime Kuma, Syncthing, Memos | [phase-3-core-services.md](docs/phase-3-core-services.md) | ✅ Written |
 | **Phase 4** | Remote Access — Tailscale subnet router, split-DNS, access from anywhere | [phase-4-remote-access.md](docs/phase-4-remote-access.md) | ✅ Written |
 | **Phase 5** | Dev & CI/CD — Jenkins, SonarQube, GitHub webhooks, Terraform, Ansible | *(not yet written)* | 🔲 Planned |
 | **Phase 6** | Monitoring — Prometheus, Grafana, node_exporter, cAdvisor, Telegram alerts | *(not yet written)* | 🔲 Planned |
@@ -167,12 +226,15 @@ ping 192.168.1.101
 | Service | URL |
 |---|---|
 | Proxmox VE | https://192.168.1.10:8006 |
-| Nginx Proxy Manager | http://192.168.1.100:81 |
+| Traefik dashboard | http://192.168.1.100:8080 |
 | AdGuard Home | http://192.168.1.100:3000 |
 | Portainer | http://portainer.yourdomain.com or http://192.168.1.101:9000 |
-| Vaultwarden | http://vault.yourdomain.com |
-| Immich | http://immich.yourdomain.com |
-| Uptime Kuma | http://status.yourdomain.com |
+| Vaultwarden | https://vault.yourdomain.com |
+| Immich | https://immich.yourdomain.com |
+| Stirling-PDF | https://pdf.yourdomain.com |
+| Uptime Kuma | https://status.yourdomain.com |
+| Syncthing | http://192.168.1.101:8384 (LAN only) |
+| Memos | https://memos.yourdomain.com |
 
 > Replace `yourdomain.com` with your actual domain. All URLs require either being on your home LAN or Tailscale connected.
 
@@ -216,7 +278,7 @@ ssh root@192.168.1.101
 docker ps
 ```
 
-All containers (`portainer`, `vaultwarden`, `immich_*`, `stirling-pdf`, `uptime-kuma`) should show `Up`. If Docker itself failed to start:
+All containers (`portainer`, `vaultwarden`, `immich_server`, `immich_postgres`, `immich_redis`, `stirling-pdf`, `uptime-kuma`, `syncthing`, `memos`) should show `Up`. If Docker itself failed to start:
 
 ```bash
 systemctl start docker
@@ -259,7 +321,7 @@ From any LAN device (or via Tailscale):
 nslookup vault.yourdomain.com 192.168.1.1
 ```
 
-Expected: resolves to `192.168.1.100` (Nginx Proxy Manager).
+Expected: resolves to `192.168.1.100` (Traefik).
 
 If DNS is broken, check pfSense → **Services → DNS Resolver → Host Overrides** and verify the `*.yourdomain.com` entries are intact.
 
@@ -289,13 +351,39 @@ Open **http://status.yourdomain.com** (Uptime Kuma) — all monitored services s
 
 | Service | Direct Address | Proxy URL |
 |---|---|---|
-| Nginx Proxy Manager admin | 192.168.1.100:81 | — |
-| AdGuard Home admin | 192.168.1.100:3000 | — |
+| Traefik dashboard | 192.168.1.100:8080 | — (LAN only) |
+| AdGuard Home admin | 192.168.1.100:3000 | — (LAN only) |
 | Portainer | 192.168.1.101:9000 | portainer.yourdomain.com |
 | Vaultwarden | 192.168.1.101:8080 | vault.yourdomain.com |
 | Immich | 192.168.1.101:2283 | immich.yourdomain.com |
 | Stirling-PDF | 192.168.1.101:8081 | pdf.yourdomain.com |
 | Uptime Kuma | 192.168.1.101:3001 | status.yourdomain.com |
+| Syncthing | 192.168.1.101:8384 | — (LAN only) |
+| Memos | 192.168.1.101:5230 | memos.yourdomain.com |
+
+---
+
+## Secrets & Environment Files
+
+All secrets are stored in `.env` files on the server, never in committed files. Each `.env` has a corresponding `.env.example` that is safe to commit and documents the required variables.
+
+| File (on server) | Example template | Phase | Variables |
+|---|---|---|---|
+| `/opt/traefik/.env` | `/opt/traefik/.env.example` | Phase 2 | `CLOUDFLARE_API_TOKEN` |
+| `/opt/vaultwarden/.env` | `/opt/vaultwarden/.env.example` | Phase 3 | `ADMIN_TOKEN` (argon2id hash) |
+| `/etc/restic-b2.env` | `/opt/vaultwarden/restic-b2.env.example` | Phase 3 | `B2_ACCOUNT_ID`, `B2_ACCOUNT_KEY`, `RESTIC_PASSWORD` |
+
+**Rules that apply to all `.env` files:**
+- `chmod 600` — readable only by root
+- Listed in `.gitignore` — never committed
+- Actual values stored in Vaultwarden as secure notes (once Vaultwarden is up)
+
+**To set up on a new machine from scratch:**
+```bash
+cp /opt/traefik/.env.example /opt/traefik/.env
+# Fill in real values, then:
+chmod 600 /opt/traefik/.env
+```
 
 ---
 
