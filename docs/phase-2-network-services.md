@@ -504,7 +504,7 @@ After the wizard, the **Upstream DNS servers** list may contain `0.0.0.0:53` —
 
 | | pfSense ✅ (correct) | AdGuard ❌ (wrong) |
 |---|---|---|
-| **URL** | `http://192.168.1.1` | `http://192.168.15.100:3000` |
+| **URL** | `http://192.168.1.1` | `http://192.168.15.100:3000` (or your AdGuard IP) |
 | **Page title** | pfSense — Services / DNS Resolver | AdGuard Home — Filters / DNS rewrites |
 | **Navigation path** | Services → DNS Resolver → Host Overrides | Filters → DNS rewrites |
 | **Form fields** | Host, Domain, IP address, Description | Domain, Answer (IP or domain) |
@@ -520,15 +520,20 @@ Add each entry:
 | Host | Domain | IP | Description |
 |---|---|---|---|
 | `homelab` | `yourdomain.com` | `192.168.1.10` | Proxmox management |
-| `adguard` | `yourdomain.com` | `192.168.1.100` | AdGuard Home admin |
+| `adguard` | `yourdomain.com` | `192.168.1.100` | AdGuard Home (direct on CT100) |
 | `traefik` | `yourdomain.com` | `192.168.1.100` | Traefik dashboard |
 | `vault` | `yourdomain.com` | `192.168.1.100` | Vaultwarden (via Traefik) |
 | `immich` | `yourdomain.com` | `192.168.1.100` | Immich (via Traefik) |
 | `pdf` | `yourdomain.com` | `192.168.1.100` | Stirling-PDF (via Traefik) |
 | `status` | `yourdomain.com` | `192.168.1.100` | Uptime Kuma (via Traefik) |
 | `portainer` | `yourdomain.com` | `192.168.1.100` | Portainer (via Traefik) |
+| `syncthing` | `yourdomain.com` | `192.168.1.100` | Syncthing (via Traefik) |
+| `memos` | `yourdomain.com` | `192.168.1.100` | Memos (via Traefik) |
 
 For each entry: **Host** + **Domain** + **IP** → **Save** → when all done, click **Apply Changes**
+
+> **Why does everything point to `192.168.1.100` when the apps run on CT101?**
+> pfSense DNS must resolve service names to **Traefik's IP** (CT100), not CT101's. When your browser opens `https://vault.yourdomain.com`, it connects to Traefik at `192.168.1.100:443`. Traefik then reads `services.yml` and internally forwards the request to `192.168.1.101:8080` (Vaultwarden on CT101). Without this, there would be no HTTPS certificate and no routing. Think of Traefik as the front door — DNS always points at the front door, not at the rooms behind it.
 
 **Verify resolution from laptop:**
 ```bash
@@ -645,6 +650,17 @@ EOF
 chmod 600 .env
 ```
 
+Create `/opt/traefik/.env.example` (safe to commit — documents required variables without real values):
+
+```bash
+cat > .env.example << 'EOF'
+# Cloudflare API token for Let's Encrypt DNS-01 challenge
+# Generate at: Cloudflare Dashboard → My Profile → API Tokens
+# Required permissions: Zone → DNS → Edit (scoped to your domain)
+CLOUDFLARE_API_TOKEN=your_cloudflare_api_token_here
+EOF
+```
+
 Create `/opt/traefik/docker-compose.yml`:
 
 ```bash
@@ -687,8 +703,9 @@ services:
       - "traefik.http.routers.dashboard.tls.certresolver=cloudflare"
       - "traefik.http.routers.dashboard.service=api@internal"
       # Restrict dashboard to LAN only
+      # If you add VLANs later (e.g. IoT on 192.168.10.0/24), add them here comma-separated
       - "traefik.http.routers.dashboard.middlewares=lan-only"
-      - "traefik.http.middlewares.lan-only.ipallowlist.sourcerange=192.168.1.0/24"
+      - "traefik.http.middlewares.lan-only.ipallowlist.sourcerange=192.168.5.0/24,192.168.10.0/24,192.168.15.0/24"
 
 networks:
   proxy:
@@ -708,9 +725,6 @@ cat > /opt/traefik/config/services.yml << 'EOF'
 # Traefik file provider — cross-host routes for CT101 services
 # Add a router + service block for each new service
 # Changes here take effect immediately (watch=true)
-http:
-  routers: {}
-  services: {}
 EOF
 ```
 
@@ -765,7 +779,7 @@ http:
 - `SERVICE_NAME` must be unique across all routers and services
 - `PORT` is the host port CT101 exposes (e.g. `8080` for Vaultwarden)
 - The CT101 `docker-compose.yml` needs **no labels** and **no proxy network** — the service just needs to be accessible on `192.168.1.101:PORT`
-- Full `services.yml` with all Phase 3 services is in Phase 3 Step 3.8
+- Full `services.yml` with all Phase 3 services is in Phase 3 Step 3.11
 
 ✅ Traefik is running and ready. Add routes in `config/services.yml` on CT100 — they go live immediately.
 
@@ -862,18 +876,18 @@ cat /opt/traefik/letsencrypt/acme.json | python3 -m json.tool | grep -i domain
 
 ## Next Steps
 
-**Phase 2 complete!** Both containers are running, DNS is configured, and Nginx PM is ready.
+**Phase 2 complete!** Both containers are running, DNS is configured, and Traefik is ready.
 
 **Phase 3 — Core Services:**
 - Install Docker in CT101
-- Deploy Portainer, Vaultwarden, Immich, Stirling-PDF, Uptime Kuma
+- Deploy Portainer, Vaultwarden, Immich, Stirling-PDF, Uptime Kuma, Syncthing, Memos
 - Configure restic + B2 Object Lock backup for Vaultwarden
-- Each service already includes Traefik labels — routes go live automatically on `docker compose up`
+- Add each new service's router + service block to `/opt/traefik/config/services.yml` on CT100 — routes go live immediately (no Traefik restart needed)
 
 See: [phase-3-core-services.md](phase-3-core-services.md)
 
 ---
 
-*Last updated: 2026-05-01*
+*Last updated: 2026-05-03*
 *Based on: HP EliteDesk 800 G4 SFF (i5-8500, 16GB DDR4, 500GB NVMe)*
 *Network: pfSense 2.8.1-RELEASE/amd64 (FreeBSD 15.0-CURRENT) → CT100 (192.168.1.100) → CT101 (192.168.1.101)*
