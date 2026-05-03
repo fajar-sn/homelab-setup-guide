@@ -16,10 +16,11 @@
 8. [App Stack — Full Decision Guide](#8-app-stack--full-decision-guide)
 9. [CI/CD Pipeline Architecture](#9-cicd-pipeline-architecture)
 10. [Cloud Staging: AWS/GCP with Terraform & Ansible](#10-cloud-staging-awsgcp-with-terraform--ansible)
-11. [Monitoring Stack](#11-monitoring-stack)
-12. [Full Roadmap](#12-full-roadmap)
-13. [HDD Migration Plan](#13-hdd-migration-plan)
-14. [Buying Guide (Indonesian E-Commerce)](#14-buying-guide-indonesian-e-commerce)
+11. [Monitoring Stack & Notifications](#11-monitoring-stack--notifications)
+12. [IoT VLAN & Home Automation](#12-iot-vlan--home-automation)
+13. [Full Roadmap](#13-full-roadmap)
+14. [HDD Migration Plan](#14-hdd-migration-plan)
+15. [Buying Guide (Indonesian E-Commerce)](#15-buying-guide-indonesian-e-commerce)
 
 ---
 
@@ -101,6 +102,8 @@
 ⚠️ You CANNOT run all LXCs simultaneously at full load.
    Run Dev LXC and Monitoring LXC on-demand, not 24/7.
    When HDD arrives and TrueNAS is added → upgrade to 32GB.
+⚠️ Syncthing + Memos add ~100MB to Core LXC — negligible, 4GB budget unchanged.
+⚠️ Home Assistant HaOS VM needs 2–4GB → DO NOT add HA until RAM upgraded to 32GB.
 ```
 
 ---
@@ -436,6 +439,8 @@ The Exploit — 3 steps:
 │    └── Immich library             │  100 GB  ⚠️ limited │
 │    └── Vaultwarden data           │  2 GB               │
 │    └── Stirling-PDF temp          │  5 GB               │
+│    └── Syncthing data             │  2 GB               │
+│    └── Memos data                 │  1 GB               │
 ├───────────────────────────────────┼─────────────────────┤
 │  LXC: Dev & CI/CD rootfs          │  20 GB              │
 │    └── SonarQube data + DB        │  30 GB              │
@@ -449,7 +454,7 @@ The Exploit — 3 steps:
 ├───────────────────────────────────┼─────────────────────┤
 │  Proxmox backup storage           │  80 GB              │
 ├───────────────────────────────────┼─────────────────────┤
-│  Free headroom                    │  ~106 GB            │
+│  Free headroom                    │  ~100 GB            │
 ├───────────────────────────────────┼─────────────────────┤
 │  TOTAL                            │  500 GB ✅          │
 └───────────────────────────────────┴─────────────────────┘
@@ -706,6 +711,14 @@ Cron (crontab -e):
 | Public URLs | Cloudflare Tunnel | ✅ Install now |
 | Remote (Phase 2) | WireGuard on VPS | ⏳ Month 3–6 |
 | SMB/NFS shares | ~~TrueNAS~~ | ⏳ Add when HDD arrives |
+| File sync | Syncthing | ✅ Install now — phone/device → server sync, replaces Google Drive |
+| Quick notes | Memos | ✅ Install now — Google Keep replacement (~50MB RAM) |
+| Knowledge mgmt | Obsidian (client) + Syncthing | ✅ Zero server RAM — sync Obsidian vault via Syncthing |
+| Home automation | Home Assistant (HaOS VM) | ⏳ After RAM upgrade to 32GB + IoT VLAN setup |
+| Office suite | OnlyOffice | ⏳ After RAM upgrade — run on-demand, not 24/7 |
+| File sharing (LAN) | Samba | ⏳ Add when HDD arrives — serve files from ZFS pool |
+| IoT network isolation | pfSense VLAN + managed switch | ⏳ Before Home Assistant — mandatory security step |
+| System alerts | Grafana → Telegram bot + Email | ✅ Set up in Phase 6 monitoring |
 
 ---
 
@@ -733,6 +746,14 @@ Cron (crontab -e):
 | **Gitea** | ❌ Skip | Using GitHub instead — saves 20GB disk + RAM |
 | **Jenkins** | ✅ Add | Legacy CI/CD — learn Groovy DSL + enterprise patterns |
 | **GitHub Actions runner** | ✅ Add | Modern CI/CD — YAML-native, GitHub-integrated, zero RAM when idle |
+| **Syncthing** | ✅ Add | ~50MB RAM idle. P2P encrypted file sync (phone → server). Replaces Google Drive/iCloud for files. BSD-licensed, no central server |
+| **Memos** | ✅ Add | ~50MB RAM. Google Keep replacement. Docker-native, clean UI, active development. No heavy stack |
+| **Obsidian** | ✅ Client-only | PKM/markdown notes on your devices. Sync vault folder via Syncthing — zero server RAM cost |
+| **Home Assistant** | ⏳ After 32GB RAM | HaOS VM (2–4GB). Home automation standard. IoT VLAN + managed switch required first |
+| **OnlyOffice** | ⏳ After 32GB RAM | Run on-demand. 2–4GB RAM. Google Docs/Sheets replacement. Not urgent |
+| **Samba** | ⏳ With HDD Stage A | SMB file sharing from ZFS pool. Not useful without significant storage capacity |
+| **Nextcloud (full)** | ❌ Skip | Too heavy (~1.5GB RAM) for notes-only use. Use Memos + Obsidian instead |
+| **Bitwarden (official)** | ❌ Skip | Vaultwarden IS the Bitwarden server — all official Bitwarden clients connect to it natively |
 
 ---
 
@@ -873,7 +894,73 @@ Local *.lan overrides → add in pfSense:
   pdf.lan      → [Traefik LXC IP]
   status.lan   → [Traefik LXC IP]
   adguard.lan  → [Core Services LXC IP]
+  memos.lan    → [Traefik LXC IP]
+  syncthing.lan → [Core Services LXC IP]
 ```
+
+---
+
+### Notes Stack — Memos + Obsidian + Syncthing
+
+**Why NOT Nextcloud for notes?**
+```
+Nextcloud full stack (just for notes):
+  MariaDB      ~400MB RAM
+  Redis        ~100MB RAM
+  PHP-FPM      ~300MB RAM
+  nginx        ~50MB RAM
+  Nextcloud    ~400MB RAM
+  ──────────────────────
+  Total:       ~1.2–1.5GB RAM   (just for sticky notes)
+
+Memos (same result):  ~50MB RAM
+Obsidian (client):    0 MB server RAM
+Syncthing (vault):    ~50MB RAM (already running for photos)
+─────────────────────────────────────
+Total:                ~50–100MB RAM
+```
+
+**Three-layer notes architecture:**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Layer 1 — Quick capture (Google Keep replacement)              │
+│  Memos :5230 → memos.lan (via Traefik)                         │
+│  Use case: quick thoughts, links, shopping lists, reminders     │
+│  Mobile: Memos PWA or official app (F-Droid)                   │
+├─────────────────────────────────────────────────────────────────┤
+│  Layer 2 — Long-form knowledge (Notion/Obsidian replacement)    │
+│  Obsidian (client app on phone, laptop, desktop)               │
+│  Vault: ~/Documents/ObsidianVault/ (synced via Syncthing)      │
+│  Zero server RAM — just a folder synced peer-to-peer           │
+│  Plugin ecosystem: Dataview, Excalidraw, Calendar, etc.        │
+├─────────────────────────────────────────────────────────────────┤
+│  Layer 3 — File sync backbone (Google Drive replacement)        │
+│  Syncthing :8384 (admin UI, LAN only)                          │
+│  Syncs: DCIM/ (photos for Immich) + ObsidianVault/ + Documents/│
+│  E2E encrypted, no central server, works offline               │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Syncthing setup quick-start:**
+```bash
+# docker-compose.yml for Core Services LXC
+syncthing:
+  image: lscr.io/linuxserver/syncthing:latest
+  container_name: syncthing
+  environment:
+    - PUID=1000
+    - PGID=1000
+  volumes:
+    - ./syncthing/config:/config
+    - /data/syncthing:/data   # mount your sync folder
+  ports:
+    - 8384:8384   # web UI (restrict to LAN)
+    - 22000:22000 # sync protocol
+    - 21027:21027/udp # discovery
+  restart: unless-stopped
+```
+Install Syncthing on Android via F-Droid → pair via device ID → sync begins automatically.
 
 ---
 
@@ -1101,7 +1188,7 @@ jobs:
 
 ---
 
-## 11. Monitoring Stack
+## 11. Monitoring Stack & Notifications
 
 ### What Gets Monitored
 
@@ -1137,13 +1224,136 @@ Grafana alert rules (mandatory):
   🟡 WARNING:  NVMe usage > 70% → plan cleanup
   🔴 CRITICAL: Vaultwarden unreachable > 5 min
   🟡 WARNING:  Any service down > 5 min
+```
 
-Notification: Telegram bot (easiest to set up)
+### Notification Channels — Telegram + Email
+
+**Use BOTH:** different failure modes require different channels.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Telegram Bot — primary, instant, interactive           │
+│  ✅ Works in Indonesia (no Google account needed)       │
+│  ✅ < 5 min to set up                                   │
+│  ✅ Rich alerts: emoji, markdown, service buttons       │
+│  ✅ Works even if home server is unreachable            │
+│     (sent via Telegram's API from Grafana)              │
+├─────────────────────────────────────────────────────────┤
+│  Email — backup, delivery guaranteed                    │
+│  ✅ Permanent audit log (Gmail search for old alerts)   │
+│  ✅ Works when Telegram is blocked or down              │
+│  ✅ Required for critical security alerts               │
+│  Use: SMTP relay (Gmail + App Password or Mailgun free) │
+└─────────────────────────────────────────────────────────┘
+
+Rule: WARNING → Telegram only
+      CRITICAL → Telegram + Email
+```
+
+**Telegram bot setup (5 minutes):**
+```
+1. Open Telegram → search @BotFather → /newbot
+2. Name it (e.g. HomelabBot) → get TOKEN
+3. Start a chat with your bot → get your CHAT_ID:
+   curl https://api.telegram.org/bot<TOKEN>/getUpdates
+4. In Grafana → Alerting → Contact points → Add Telegram
+   Bot token: <TOKEN>
+   Chat ID:   <CHAT_ID>
+5. Test → you'll get "Test alert" message instantly
+```
+
+**Email (Gmail App Password) setup:**
+```
+Gmail → Settings → Security → 2FA on → App Passwords → Generate
+In Grafana → Alerting → Contact points → Add Email
+  SMTP host:     smtp.gmail.com:587
+  From address:  your@gmail.com
+  SMTP user:     your@gmail.com
+  SMTP password: [16-char app password]
 ```
 
 ---
 
-## 12. Full Roadmap
+## 12. IoT VLAN & Home Automation
+
+### Why IoT VLAN is Mandatory Before Home Assistant
+
+```
+⚠️  Smart devices (lights, plugs, cameras) have poor security:
+    - hardcoded credentials
+    - unpatched firmware
+    - phone-home to vendor servers
+    - some have known backdoors
+
+  Putting them on your main LAN = they can reach your server at
+  192.168.1.10, your NAS, your pfSense admin UI.
+
+  IoT VLAN solution:
+    IoT devices get their own subnet (192.168.10.x)
+    Firewall rules BLOCK them from reaching 192.168.1.x
+    Home Assistant (on trusted VLAN) CAN reach IoT devices
+    IoT devices CANNOT reach HA or any server
+```
+
+### Hardware Required
+
+| Item | Product | Est. Price (Rp) | Notes |
+|---|---|---|---|
+| Managed switch | TP-Link TL-SG108E | 350,000–450,000 | 8-port gigabit, 802.1Q VLAN |
+| VLAN-capable AP | TP-Link EAP225 | 400,000–600,000 (used) | Multiple SSIDs + VLAN tagging |
+
+> Your current unmanaged switch and Huawei HG8145V5 WiFi cannot do VLAN tagging.
+> The Huawei ONT must stay for GPON/IndiHome, but its WiFi can be disabled once you have a proper AP.
+
+### VLAN Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  pfSense (192.168.1.1)                                         │
+│  ├─ VLAN 1  (trusted)  192.168.1.x/24   — server, your devices│
+│  └─ VLAN 10 (IoT)      192.168.10.x/24  — smart plugs, cameras│
+├─────────────────────────────────────────────────────────────────┤
+│  pfSense firewall rules for IoT VLAN (192.168.10.x):          │
+│  ALLOW   IoT → WAN          (firmware updates, cloud APIs)    │
+│  ALLOW   192.168.1.x → IoT  (Home Assistant controls devices) │
+│  BLOCK   IoT → 192.168.1.x  (IoT cannot reach server/router) │
+│  BLOCK   IoT → IoT          (device isolation, no lateral mvt)│
+└─────────────────────────────────────────────────────────────────┘
+
+WiFi SSIDs (on EAP225/EAP610 AP):
+  "HomeNet"   → VLAN 1  (trusted) — your phone, laptop
+  "HomeIoT"   → VLAN 10 (IoT)     — smart devices only
+```
+
+### Home Assistant Setup (after 32GB RAM + IoT VLAN done)
+
+```
+Verification before installing HA:
+  [ ] RAM = 32GB installed
+  [ ] Managed switch in place, VLAN tagging working
+  [ ] IoT SSID exists and IoT devices cannot ping 192.168.1.10
+  [ ] pfSense VLAN 10 firewall rules verified
+
+Install Home Assistant OS (HaOS) as Proxmox VM:
+  CPU:  2 cores
+  RAM:  4096 MB
+  Disk: Import HaOS QCOW2 from github.com/home-assistant/operating-system
+  Net:  vmbr0 (VLAN 1 — trusted) so HA can reach IoT devices
+
+Post-install:
+  Access: http://homeassistant.local:8123
+  HA discovers devices via mDNS on IoT VLAN
+  Enable integrations for your specific smart lights/plugs
+  Set up automations: lights on sunset, away mode, etc.
+```
+
+> This section is FUTO-aligned: the FUTO guide strongly recommends Home Assistant
+> as the home automation standard. The key difference is that FUTO's guide assumes
+> unlimited RAM — on your 16GB system, HA must wait for the RAM upgrade.
+
+---
+
+## 13. Full Roadmap
 
 ### Phase 0 — Preparation (Day 1)
 ```
@@ -1221,8 +1431,32 @@ Notification: Telegram bot (easiest to set up)
 [ ] Deploy Stirling-PDF
 [ ] Deploy Uptime Kuma
 [ ] Add Uptime Kuma disk usage monitor (alert at 70%)
-[ ] Configure Traefik Docker labels for: vault.lan, immich.lan, pdf.lan, status.lan, adguard.lan
+
+[ ] Deploy Syncthing (file sync from phone/devices to server)
+    Port: 8384 (admin UI — restrict to LAN only in Traefik/firewall)
+    Install Syncthing on Android: F-Droid or Play Store
+    Add your server as a device → share DCIM/ folder
+    → Immich can ingest from /data/syncthing/DCIM/ automatically
+    Also sync: ObsidianVault/ folder for note-taking
+
+[ ] Deploy Memos (quick notes — Google Keep replacement)
+    Port: 5230
+    Add Traefik label: memos.lan
+    Add pfSense DNS override: memos.lan → [Traefik LXC IP]
+
+[ ] Install Obsidian on all your devices (phone, laptop, desktop)
+    Create vault folder in Syncthing shared directory: ~/Documents/ObsidianVault/
+    Open Obsidian → Open folder as vault → point to ObsidianVault/
+    Zero server config needed — Syncthing handles all sync
+
+[ ] Configure Traefik Docker labels for:
+    vault.lan, immich.lan, pdf.lan, status.lan, adguard.lan, memos.lan
     (see Traefik setup in Section 8 — add labels to each service's docker-compose.yml)
+
+[ ] Add pfSense DNS overrides for new services:
+    Services → DNS Resolver → Host Overrides
+    memos.lan     → [Traefik LXC IP]
+    syncthing.lan → [Core Services LXC IP]:8384
 ```
 
 ### Phase 4 — Remote Access (Day 3–4)
@@ -1320,9 +1554,59 @@ Notification: Telegram bot (easiest to set up)
 [ ] OpenVPN on pfSense restored ✅
 ```
 
+### Phase 10 — IoT VLAN & Home Automation (lowest priority — do when buying smart devices)
+```
+💡 Only start this phase when you actually plan to buy smart home devices.
+   If you have no IoT devices, skip entirely — there is nothing to isolate.
+
+   Prerequisite order:
+     RAM upgrade (32GB) → buy IoT hardware + switch/AP → configure VLAN → install Home Assistant
+   All three steps are blocked by the RAM upgrade anyway, so they arrive together.
+
+--- Optional now: Pre-configure pfSense (no hardware required) ---
+[ ] Configure VLANs in pfSense (do anytime, costs nothing):
+    Interfaces → VLANs → Add
+      VLAN 1  (trusted):  192.168.1.x   — your devices, server, pfSense
+      VLAN 10 (IoT):      192.168.10.x  — smart lights, plugs, cameras
+    Assign VLAN 10 as new interface → enable DHCP for 192.168.10.0/24
+
+[ ] pfSense firewall rules for IoT VLAN interface (192.168.10.x):
+    ALLOW   IoT (192.168.10.x) → WAN         (internet access for firmware)
+    ALLOW   192.168.1.x → IoT VLAN           (Home Assistant controls devices)
+    BLOCK   IoT → 192.168.1.x                (IoT cannot reach server/router)
+    BLOCK   IoT → IoT                        (device isolation)
+
+--- Buy when ready for smart home devices (alongside RAM upgrade) ---
+[ ] Buy managed switch (TP-Link TL-SG108E ~Rp 400,000)
+    Must support 802.1Q VLAN tagging
+    Connect: ONT → pfSense WAN port
+              pfSense LAN port → managed switch
+              Server + EAP225 AP → managed switch
+
+[ ] Buy VLAN-capable WiFi AP (TP-Link EAP225 or EAP610 ~Rp 500,000 used)
+    Must support multiple SSIDs each mapped to a different VLAN
+    Disable WiFi on Huawei HG8145V5 once AP is working
+
+[ ] Configure EAP225 AP via Omada or standalone mode:
+    SSID: "HomeNet" → VLAN 1  (trusted)  — your phone, laptop
+    SSID: "HomeIoT" → VLAN 10 (IoT only) — smart devices
+
+[ ] Move all smart devices to HomeIoT SSID
+
+[ ] Verify isolation:
+    From IoT device: ping 192.168.1.10 → should FAIL ✅
+    From your laptop: ping 192.168.10.x IoT device → should work
+    From IoT device: ping 8.8.8.8 → should work (internet access)
+
+--- Then install Home Assistant (RAM must be 32GB) ---
+[ ] Download HaOS QCOW2 → create Proxmox VM (see Section 12 for full steps)
+[ ] Access http://homeassistant.local:8123
+[ ] Install integrations for your smart devices
+```
+
 ---
 
-## 13. HDD Migration Plan
+## 14. HDD Migration Plan
 
 > You can buy HDDs one at a time. All paths lead to the same final state.
 > Follow Stage A when the 1st HDD arrives, Stage B when the 2nd arrives.
@@ -1592,6 +1876,48 @@ Verify each mount appears before proceeding.
 [ ] Stage A complete ✅
 ```
 
+#### Step 10: Set Up Samba File Sharing (from ZFS pool)
+```
+[ ] TrueNAS UI → Sharing → SMB → Add share:
+    Path: /mnt/tank/archive
+    Name: archive
+[ ] TrueNAS → Services → SMB → Start + Enable on boot
+[ ] Windows access:  \\192.168.1.11\archive
+[ ] macOS access:    smb://192.168.1.11/archive
+[ ] Remote access:   via Tailscale VPN only — NEVER expose SMB (port 445) to internet
+[ ] Add Syncthing on TrueNAS:
+    TrueNAS → Apps → Syncthing (or run in a jail)
+    Point to /mnt/tank/media for large file sync from devices
+```
+
+#### Step 11: Add Home Assistant VM (once RAM = 32GB + IoT VLAN done)
+```
+⚠️  Prerequisites — ALL must be true before continuing:
+    [ ] RAM upgraded to 32GB ✅
+    [ ] Managed switch (802.1Q VLAN) in place ✅
+    [ ] IoT VLAN (192.168.10.x) configured in pfSense ✅
+    [ ] IoT devices cannot ping 192.168.1.10 ✅
+    [ ] EAP225/EAP610 AP with HomeIoT SSID mapped to VLAN 10 ✅
+
+[ ] Download HaOS QCOW2 image:
+    https://github.com/home-assistant/operating-system/releases
+    Choose: haos_ova-*.qcow2.xz → extract
+
+[ ] Proxmox → Create VM:
+    Name: homeassistant
+    CPU:  2 cores
+    RAM:  4096 MB
+    Disk: Import QCOW2 via:
+          qm importdisk <vmid> haos_ova-*.qcow2 local-zfs
+    Net:  vmbr0 (trusted VLAN 1 — so HA can control IoT devices)
+
+[ ] Boot VM → access http://homeassistant.local:8123 or http://[HA IP]:8123
+[ ] Complete onboarding wizard
+[ ] HA discovers devices on IoT VLAN via mDNS (pfSense firewall allows 192.168.1.x → IoT)
+[ ] Install integrations: Xiaomi, TP-Link Kasa, Tuya, etc. (whatever smart devices you buy)
+[ ] Enable Tailscale add-on in HA for remote access to automations
+```
+
 ---
 
 ### Stage B — 2nd HDD Added (Complete the ZFS Mirror)
@@ -1718,7 +2044,7 @@ Note: ZFS mirror uses 2nd drive entirely for redundancy, not extra space.
 
 ---
 
-## 14. Buying Guide (Indonesian E-Commerce)
+## 15. Buying Guide (Indonesian E-Commerce)
 
 *Tokopedia / Shopee / Lazada*
 
@@ -1799,6 +2125,18 @@ Note: ZFS mirror uses 2nd drive entirely for redundancy, not extra space.
 
 ---
 
+### Priority 6: IoT VLAN Hardware (lowest priority — buy alongside RAM upgrade, only when getting IoT devices)
+
+| Product | Est. Price (Rp) | Notes |
+|---|---|---|
+| TP-Link TL-SG108E (managed switch) | 350,000–450,000 | 8-port gigabit, 802.1Q VLAN tagging |
+| TP-Link EAP225 or EAP610 (WiFi AP) | 400,000–600,000 (used) | Multi-SSID + VLAN tagging per SSID |
+
+> **Only buy these when you plan to get smart home devices.** Zero IoT devices = zero risk on your current setup.
+> pfSense VLAN rules can be pre-configured for free at any time — the hardware only matters when IoT devices physically arrive.
+
+---
+
 ### Budget Summary
 
 ```
@@ -1809,10 +2147,11 @@ Note: ZFS mirror uses 2nd drive entirely for redundancy, not extra space.
 │  LATER: 32GB RAM kit (used)            │  400,000–700,000         │
 │  LATER: 2x WD Red Plus 4TB            │  1,600,000–2,000,000     │
 │  LATER: PCIe SATA card + enclosure     │  400,000–800,000         │
+│  LATER: IoT VLAN hardware (switch+AP)  │  750,000–1,050,000       │
 │  ONGOING: Hetzner VPS (Phase 2)        │  ~57,000/month           │
 ├────────────────────────────────────────┼──────────────────────────┤
 │  Start today (NVMe only)               │  Rp 380,000–650,000 ✅   │
-│  Full setup (NVMe + HDD + RAM)         │  Rp 2,780,000–4,150,000  │
+│  Full setup (NVMe + HDD + RAM + IoT)   │  Rp 3,530,000–5,200,000  │
 └────────────────────────────────────────┴──────────────────────────┘
 ```
 
@@ -1829,16 +2168,25 @@ Storage NOW:    500GB M.2 NVMe only — no redundancy
                 Offsite backup via restic → Backblaze B2 (Object Lock) is MANDATORY
 
 Storage LATER:  2x 4TB WD Red Plus → ZFS mirror → TrueNAS Scale VM
-                Add when budget allows — migrate data with steps in Section 13
+                Add when budget allows — migrate data with steps in Section 14
 
 Services:
   Core:         Immich (new photos only), Vaultwarden, Stirling-PDF, Uptime Kuma
                 AdGuard Home (backup DNS)
+                Syncthing (file sync from phone/devices)
+                Memos (quick notes — Google Keep replacement, :5230)
+  Notes PKM:    Obsidian client + Syncthing vault sync (zero server RAM)
   Dev/CI:       GitHub (remote) + Jenkins (legacy) + GHA runner (modern) + SonarQube (on-demand)
   IaC:          Terraform CLI, Ansible CLI (no RAM cost when idle)
   Monitoring:   Prometheus (30d retention), Grafana
+                Alerts: Telegram bot (primary) + Email/Gmail (backup)
   DNS/Blocking: pfBlockerNG on pfSense (primary) + AdGuard Home LXC (backup)
   Proxy:        Traefik (Docker-native auto-discovery, CNCF-listed)
+
+Deferred (need 32GB RAM + IoT VLAN setup first):
+  Home Automation: Home Assistant HaOS VM (4GB RAM) — add Phase 3.5 IoT VLAN first
+  File sharing:    Samba (serve ZFS pool) — add with HDD Stage A
+  Office suite:    OnlyOffice (on-demand only) — not urgent
 
 Remote Phase 1: Tailscale (private) + Cloudflare Tunnel (public URLs)
 Remote Phase 2: WireGuard VPS relay → sovereignty + OpenVPN restored
